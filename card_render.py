@@ -169,7 +169,14 @@ class HeroCardRenderer:
         card = self.render(spec, art, offset, zoom)
         scale = height / card.height
         card = card.resize((round(card.width * scale), height), Image.LANCZOS)
-        out = out_path or Path("data") / "_render.png"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        card.convert("RGBA").save(out, "PNG", optimize=True)
-        return out
+        if out_path is None:
+            import tempfile
+            out_path = Path(tempfile.gettempdir()) / "arcanum_render.png"
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            card.convert("RGBA").save(out_path, "PNG", optimize=True)
+        except OSError:
+            import tempfile
+            out_path = Path(tempfile.gettempdir()) / out_path.name
+            card.convert("RGBA").save(out_path, "PNG", optimize=True)
+        return out_path

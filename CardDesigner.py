@@ -30,7 +30,8 @@ from pathlib import Path
 from urllib import error as _urlerr
 from urllib import request as _urlreq
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+PROJECT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(PROJECT_DIR))
 
 from arcanum.core.constants import SUPABASE_ANON_KEY, SUPABASE_URL  # noqa: E402
 from arcanum.game.cardspec import (CardSpec, KeywordRef, make_card_id)  # noqa: E402
@@ -42,8 +43,23 @@ except Exception:  # noqa: BLE001 - designer still runs without pillow
     HeroCardRenderer = None
 
 ART_BOX = (512, 384)          # card frame art window (4:3)
-LOCAL_FILE = Path("data/designed_cards.json")
-LOCAL_ART = Path("assets/cards")
+LOCAL_FILE = PROJECT_DIR / "data" / "designed_cards.json"
+LOCAL_ART = PROJECT_DIR / "assets" / "cards"
+
+
+def work_dir() -> Path:
+    """Writable scratch space: the project's data folder, else the OS temp
+    directory (covers launches from read-only working directories)."""
+    candidate = PROJECT_DIR / "data"
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        probe = candidate / ".write_test"
+        probe.write_text("ok")
+        probe.unlink()
+        return candidate
+    except OSError:
+        import tempfile
+        return Path(tempfile.gettempdir()) / "arcanum_designer"
 
 
 # ---------------------------------------------------------------------------
@@ -525,11 +541,11 @@ def run() -> None:
             # non-hero templates pending: upload fitted art only (if any)
             if state["art_img"] is None:
                 return None
-            fitted = Path("data") / "_designer_art.png"
-            fitted.parent.mkdir(exist_ok=True)
+            fitted = work_dir() / "_designer_art.png"
+            fitted.parent.mkdir(parents=True, exist_ok=True)
             state["art_img"].save(fitted, "PNG")
             return fitted
-        out = Path("data") / f"_publish_{spec.id}.png"
+        out = work_dir() / f"_publish_{spec.id}.png"
         state["renderer"].render_png(spec, state["art_img"],
                                      offset=tuple(state["offset"]),
                                      zoom=state["zoom"], out_path=out)
