@@ -5,6 +5,7 @@ single source of truth when the project grows.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -62,7 +63,16 @@ SCREEN_MODES = ("borderless", "windowed", "fullscreen")
 # ---------------------------------------------------------------------------
 # Networking placeholders (wired up when the backend goes live)
 # ---------------------------------------------------------------------------
-SUPABASE_URL = ""        # e.g. "https://xyzcompany.supabase.co"
-SUPABASE_ANON_KEY = ""   # public anon key (safe for client distribution)
-GAME_SERVER_URL = ""     # e.g. "wss://play.arcanum.gg/match"
+# Supabase project credentials. Set env vars ARCANUM_SUPABASE_URL and
+# ARCANUM_SUPABASE_KEY, or paste the values here. The anon key is PUBLIC by
+# design (safe to ship in the client); row-level security protects the data.
+SUPABASE_URL = os.environ.get("ARCANUM_SUPABASE_URL",
+                              "https://xiozpfainvmbcngcummm.supabase.co")
+SUPABASE_ANON_KEY = os.environ.get(
+    "ARCANUM_SUPABASE_KEY", "sb_publishable_I-nkNvBXXjAfg2wAJnblrw_USLbXJC1")
+# Game server address. Set the ARCANUM_SERVER_URL environment variable, or
+# paste your Render URL here (https://... becomes wss://...), e.g.
+# "wss://arcanum-server.onrender.com"
+GAME_SERVER_URL = os.environ.get("ARCANUM_SERVER_URL",
+                                 "wss://arcanumtcg-v313.onrender.com")
 PROTOCOL_VERSION = 1     # bump when the wire protocol changes

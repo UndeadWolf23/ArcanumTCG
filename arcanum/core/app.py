@@ -27,7 +27,7 @@ from arcanum.ui.background import Background
 log = logging.getLogger(__name__)
 
 # Custom pointer art. Searched next to main.py first, then assets/images/.
-CURSOR_CANDIDATES = (ROOT_DIR / "cursor.png", IMAGES_DIR / "cursor.png")
+CURSOR_CANDIDATES = (IMAGES_DIR / "cursor.png", ROOT_DIR / "cursor.png")
 CURSOR_HEIGHT = 36  # px; source art is scaled down to this
 
 
@@ -58,6 +58,8 @@ class App:
         self._silent_lock = threading.Lock()
 
         self.bus.subscribe(Events.APP_QUIT, self.quit)
+        self.bus.subscribe(Events.AUTH_LOGIN_SUCCESS, self._on_login)
+        self.bus.subscribe(Events.AUTH_LOGOUT, self._on_logout)
 
     # ------------------------------------------------------------ display
     @staticmethod
@@ -180,6 +182,20 @@ class App:
                 log.warning("Could not load cursor %s: %s", path, exc)
         log.info("No cursor.png found; using system cursors.")
 
+    # ------------------------------------------------------------ session/net
+    def _on_login(self, user, **_kw) -> None:
+        token = self.backend.session.saved_token() or "dev"
+        try:
+            self.backend.net.connect(token, name=user.username)
+        except Exception:  # noqa: BLE001 - going online must never block play
+            log.exception("Could not start network client")
+
+    def _on_logout(self, **_kw) -> None:
+        try:
+            self.backend.net.disconnect()
+        except Exception:  # noqa: BLE001
+            log.exception("Network disconnect failed")
+
     # ------------------------------------------------------------ navigation
     def goto_login(self, notice: str = "") -> None:
         from arcanum.scenes.login import LoginScene
@@ -240,6 +256,10 @@ class App:
         finally:
             # settings persist and the window closes even on a crash
             self.settings.save()
+            try:
+                self.backend.net.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
             pygame.quit()
 
     def quit(self) -> None:

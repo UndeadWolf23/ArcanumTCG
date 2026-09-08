@@ -12,7 +12,8 @@ from typing import Optional
 
 import pygame
 
-from arcanum.core.constants import APP_NAME, APP_VERSION, IMAGES_DIR, ROOT_DIR
+from arcanum.core.constants import (APP_NAME, APP_VERSION, IMAGES_DIR,
+                                    ROOT_DIR, SUPABASE_URL)
 from arcanum.core.events import Events
 from arcanum.core.scene import Scene
 from arcanum.services.auth import AuthResult, AuthService
@@ -26,7 +27,7 @@ log = logging.getLogger(__name__)
 SIGN_IN, SIGN_UP, FORGOT = "sign_in", "sign_up", "forgot"
 
 # Placeholder key art. Searched next to main.py first, then assets/images/.
-BACKGROUND_CANDIDATES = (ROOT_DIR / "background.jpg", IMAGES_DIR / "background.jpg")
+BACKGROUND_CANDIDATES = (IMAGES_DIR / "background.jpg", ROOT_DIR / "background.jpg")
 
 
 def _load_background() -> pygame.Surface | None:
@@ -91,7 +92,8 @@ class LoginScene(Scene):
             return box
 
         if self.mode == SIGN_IN:
-            self.in_identifier = add_input(py + 40, "Username or email")
+            id_hint = "Email" if SUPABASE_URL else "Username or email"
+            self.in_identifier = add_input(py + 40, id_hint)
             self.in_password = add_input(py + 104, "Password", password=True)
             self.chk_remember = Checkbox((px, py + 170), "Remember me", self._remember,
                                          on_change=self._set_remember)

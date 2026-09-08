@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 
-from arcanum.core.constants import SUPABASE_URL
+from arcanum.core.constants import GAME_SERVER_URL, SUPABASE_URL
 from arcanum.core.events import EventBus
 from arcanum.services.auth import AuthService, LocalAuthService, SupabaseAuthService
-from arcanum.services.net.client import NetworkClient, OfflineClient
+from arcanum.services.net.client import (NetworkClient, OfflineClient,
+                                          WebSocketClient)
 from arcanum.services.net.matchmaking import Matchmaker
 from arcanum.services.session import Session
 
@@ -28,14 +29,27 @@ class Backend:
 
     @classmethod
     def create(cls, bus: EventBus) -> "Backend":
-        """Service resolution. Local today; Supabase + WebSocket later."""
+        """Service resolution: pick real services when they're configured."""
         if SUPABASE_URL:
-            log.info("Backend: Supabase configured — using online services.")
-            auth: AuthService = SupabaseAuthService()
-            # net = WebSocketClient(bus)   # enabled with the game server
-            net: NetworkClient = OfflineClient(bus)
+            try:
+                auth: AuthService = SupabaseAuthService()
+                log.info("Backend: Supabase configured — real accounts enabled.")
+            except RuntimeError as exc:
+                log.warning("%s — falling back to local auth.", exc)
+                auth = LocalAuthService()
         else:
-            log.info("Backend: no Supabase config — using local offline services.")
+            log.info("Backend: no Supabase config — using local auth.")
             auth = LocalAuthService()
+
+        net: NetworkClient
+        if GAME_SERVER_URL:
+            try:
+                net = WebSocketClient(bus, GAME_SERVER_URL)
+                log.info("Backend: game server configured (%s).", GAME_SERVER_URL)
+            except RuntimeError as exc:
+                log.warning("%s — running offline.", exc)
+                net = OfflineClient(bus)
+        else:
+            log.info("Backend: no game server configured — offline mode.")
             net = OfflineClient(bus)
         return cls(auth=auth, net=net, bus=bus)
