@@ -9,6 +9,7 @@ import pygame
 
 from arcanum.core.constants import APP_NAME
 from arcanum.core.events import Events
+from arcanum.services.net.protocol import MsgType
 from arcanum.core.scene import Scene
 from arcanum.ui import theme
 from arcanum.ui.animation import Tween
@@ -17,11 +18,38 @@ from arcanum.ui.widgets import Button, apply_cursor
 
 class HomeScene(Scene):
     def on_enter(self, **kwargs) -> None:
+        self._awaiting_match = False
+        self.app.bus.subscribe(Events.NET_MESSAGE, self._on_net_message)
         self._time = 0.0
         self._intro = Tween(0.0, 1.0, 0.5)
         self.toast = ""
         self._toast_timer = 0.0
+        self._queued: str | None = None      # "ai" | "pvp" while waiting
+        self.app.bus.subscribe(Events.NET_MESSAGE, self._on_net)
         self._build()
+
+    def on_exit(self) -> None:
+        self.app.bus.unsubscribe(Events.NET_MESSAGE, self._on_net)
+
+    def on_exit(self) -> None:
+        self.app.bus.unsubscribe(Events.NET_MESSAGE, self._on_net_message)
+
+    def _on_net_message(self, envelope, **_kw):
+        from arcanum.services.net.protocol import MsgType
+        if not self._awaiting_match:
+            return
+        if envelope.type == MsgType.EVENT_GAME_STATE.value:
+            self._awaiting_match = False
+            from arcanum.game.controller import RemoteController
+            from arcanum.scenes.match import MatchScene
+            controller = RemoteController(self.app.bus, self.app.backend.net,
+                                          envelope.match_id)
+            # feed this first snapshot immediately so the scene builds from it
+            controller._on_net_message(envelope)
+            self.app.scenes.switch(MatchScene(self.app), controller=controller)
+        elif envelope.type == MsgType.ERROR.value:
+            self._awaiting_match = False
+            self._show_toast(envelope.payload.get("message", "Matchmaking failed."))
 
     def on_resize(self, size: tuple[int, int]) -> None:
         if hasattr(self, "_time"):
@@ -35,6 +63,8 @@ class HomeScene(Scene):
         y = int(h * 0.42)
         entries = [
             ("Play", self._play, True),
+            ("Practice vs AI", self._practice, False),
+            ("Versus  (online PvP)", self._versus, False),
             ("Collection", lambda: self._todo("Collection"), False),
             ("Store", lambda: self._todo("Store"), False),
             ("Settings", self._settings, False),
@@ -46,11 +76,48 @@ class HomeScene(Scene):
             self.widgets.append(Button(rect, label, action, primary=primary, sound_cb=ui))
 
     # -- actions ---------------------------------------------------------
+    def _net_connected(self) -> bool:
+        state = getattr(self.app.backend.net, "state", None)
+        return getattr(state, "name", "") == "CONNECTED"
+
     def _play(self) -> None:
-        # Dev-test match against the scripted opponent. Real matchmaking
-        # replaces this via backend.matchmaking once the server exists.
-        from arcanum.scenes.match import MatchScene
-        self.app.scenes.switch(MatchScene(self.app))
+        """Online match vs the server AI when connected; local practice
+        otherwise. Either way it's the same MatchScene."""
+        if self._net_connected():
+            self._queued = "ai"
+            self.app.backend.matchmaking.join_queue("ai")
+            self._show_toast("Summoning an opponent...")
+        else:
+            from arcanum.scenes.match import MatchScene
+            self.app.scenes.switch(MatchScene(self.app))
+
+    def _versus(self) -> None:
+        if not self._net_connected():
+            self._show_toast("Versus needs a server connection.")
+            return
+        if self._queued == "pvp":
+            self._queued = None
+            self.app.backend.matchmaking.leave_queue()
+            self._show_toast("Left the queue.")
+            return
+        self._queued = "pvp"
+        self.app.backend.matchmaking.join_queue("pvp")
+        self._show_toast("Queued for Versus - waiting for a challenger...")
+
+    def _on_net(self, envelope=None, **_kw) -> None:
+        if envelope is None:
+            return
+        if envelope.type == MsgType.MATCH_FOUND.value:
+            opponent = envelope.payload.get("opponent", "an opponent")
+            self._show_toast(f"Match found vs {opponent}!")
+        elif envelope.type == MsgType.EVENT_GAME_STATE.value and self._queued:
+            self._queued = None
+            from arcanum.scenes.match import MatchScene
+            self.app.scenes.switch(MatchScene(self.app),
+                                   snapshot=envelope.payload)
+        elif envelope.type == MsgType.QUEUE_JOIN.value:
+            if envelope.payload.get("status") == "waiting":
+                self._show_toast("In queue - waiting for a challenger...")
 
     def _settings(self) -> None:
         from arcanum.scenes.settings import SettingsScene
@@ -98,6 +165,27 @@ class HomeScene(Scene):
             tag = f"Signed in as  {user.username}" + ("  ·  temp account" if user.is_guest else "")
             theme.draw_text(surface, tag, (cx, int(h * 0.18) + 66),
                             theme.body_font(16), theme.TEXT_DIM, anchor="center", alpha=alpha)
+
+        # server connection status (bottom-left)
+        net = self.app.backend.net
+        state = getattr(net, "state", None)
+        state_name = getattr(state, "name", "DISCONNECTED")
+        if state_name == "CONNECTED":
+            latency = getattr(net, "latency_ms", None)
+            online = getattr(net, "online_count", None)
+            bits = ["Online"]
+            if online:
+                bits.append(f"{online} in the aether")
+            if latency is not None:
+                bits.append(f"{latency} ms")
+            status, color = "  ·  ".join(bits), theme.SUCCESS
+        elif state_name in ("CONNECTING", "RECONNECTING"):
+            dots = "." * (1 + int(self._time * 2) % 3)
+            status, color = f"Connecting to server{dots}", theme.TEXT_DIM
+        else:
+            status, color = "Offline — practice only", theme.TEXT_FAINT
+        theme.draw_text(surface, status, (24, h - 18), theme.body_font(14),
+                        color, anchor="bottomleft")
 
         for widget in self.widgets:
             widget.draw(surface)

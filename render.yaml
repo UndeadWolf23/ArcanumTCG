@@ -1,0 +1,10 @@
+# Optional: lets Render configure the service automatically ("Blueprint").
+# You can also do everything by hand in the dashboard — steps in the chat.
+services:
+  - type: web
+    name: arcanum-server
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements-server.txt
+    startCommand: python -m server.app
+    healthCheckPath: /healthz

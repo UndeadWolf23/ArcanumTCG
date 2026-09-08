@@ -1,6 +1,8 @@
 # Core
-pygame-ce>=2.4        # rendering, input, audio (community edition of pygame)
+pygame-ce>=2.4          # rendering, input, audio
+
+# Online play (optional — the game runs offline without it)
+websocket-client>=1.6   # connects to the Arcanum game server
 
 # Enabled when the backend goes live (see arcanum/services/):
-# supabase>=2.0       # auth + database (arcanum/services/auth.py, backend.py)
-# websockets>=12.0    # game server transport (arcanum/services/net/client.py)
+# supabase>=2.0         # auth + database

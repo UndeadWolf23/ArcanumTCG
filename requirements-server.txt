@@ -1,0 +1,2 @@
+# Server-only dependencies (the game client does NOT need these)
+websockets==12.0

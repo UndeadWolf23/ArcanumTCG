@@ -25,12 +25,10 @@ from typing import Callable, Optional
 import pygame
 
 from arcanum.core.constants import IMAGES_DIR, ROOT_DIR
-from arcanum.core.events import Events
 from arcanum.core.scene import Scene
-from arcanum.game.controller import (LocalController, MatchController,
-                                     RemoteController)
-from arcanum.game.match import MAX_MANA, CardInstance, Kind, Phase
-from arcanum.game.serialize import card_from_dict
+from arcanum.game.dummy_opponent import DummyOpponent
+from arcanum.game.match import (MAX_MANA, CardInstance, Kind, MatchState,
+                                Phase)
 from arcanum.ui import theme
 from arcanum.ui.animation import Tween, approach, ease_out_back, ease_out_cubic
 from arcanum.ui.widgets import Button, LinkButton, apply_cursor
@@ -190,13 +188,9 @@ class FloatText:
 # Scene
 # ---------------------------------------------------------------------------
 class MatchScene(Scene):
-    def on_enter(self, controller: MatchController | None = None, **kwargs) -> None:
-        # The scene renders whatever controller it is given and cannot tell
-        # local practice from an online match. `self.match` is READ-ONLY here:
-        # a state view for layout and instant UI hints. Every change arrives
-        # as a controller event.
-        self.controller = controller or LocalController(local_name=self._local_name())
-        self.match = self.controller.state
+    def on_enter(self, **kwargs) -> None:
+        self.match = MatchState(local_name=self._local_name())
+        self.ai = DummyOpponent(player_index=1)
 
         self.hand: list[CardSprite] = []
         self.board: list[CardSprite] = []
@@ -226,14 +220,9 @@ class MatchScene(Scene):
 
         self.app.background.set_image(self._load_table_art())
         self._layout()
-        self.controller.start()
+        self._start_match()
 
     def on_exit(self) -> None:
-        try:
-            self.controller.concede()
-            self.controller.close()
-        except Exception:  # noqa: BLE001
-            log.exception("Controller close failed")
         self._timers.clear()
         self.app.background.set_image(None)
 
@@ -303,116 +292,112 @@ class MatchScene(Scene):
             self.opp_champ.tx, self.opp_champ.ty = self.opp_champ_pos
 
     # ------------------------------------------------------------ scheduling
-    def _schedule(self, delay, callback):
+    def _schedule(self, delay: float, callback: Callable[[], None]) -> None:
         self._timers.append([max(0.0, delay), callback])
 
-    def _run_timers(self, dt):
+    def _run_timers(self, dt: float) -> None:
         due = [t for t in self._timers if (t.__setitem__(0, t[0] - dt) or t[0] <= 0)]
         for timer in due:
             self._timers.remove(timer)
             try:
                 timer[1]()
             except Exception:  # noqa: BLE001
-                log.exception("Scene timer step failed")
+                log.exception("Match flow step failed")
 
-    # ------------------------------------------------------------ controller events
-    def _pump_controller(self, dt: float) -> None:
-        self.controller.update(dt)
-        for event in self.controller.poll_events():
-            try:
-                self._on_controller_event(event)
-            except Exception:  # noqa: BLE001
-                log.exception("Failed handling controller event %r", event.get("type"))
-
-    def _on_controller_event(self, event: dict) -> None:
-        etype = event.get("type")
-        if etype == "match_start":
-            self._on_match_start()
-        elif etype == "phase":
-            self._on_phase_event(event)
-        elif etype == "draw":
-            self._on_draw_event(event)
-        elif etype == "played":
-            self._on_played_event(event)
-        elif etype == "mana":
-            if event.get("player") == 0 and event.get("amount"):
-                self._show_toast("+1 maximum mana")
-        elif etype == "destroy":
-            self._kill_sprite(event["player"], event["uid"])
-        elif etype == "attack":
-            self._on_attack_event(event)
-        elif etype == "damage":
-            self._on_damage_event(event)
-        elif etype == "death":
-            self._kill_sprite(event["player"], event["uid"])
-        elif etype == "victory":
-            self._finish(event["player"])
-        elif etype == "rejected":
-            self._cancel_stage()
-            self._show_toast(event.get("reason", "That action was refused."))
-
-    def _spawn_hand_sprite(self, card):
-        sprite = CardSprite(card, self.deck_pos)
-        sprite.start_spawn()
-        self.hand.append(sprite)
-        self.app.audio.ui_sound("draw")
-
-    def _on_match_start(self) -> None:
-        self.opp_hand_count = self.controller.opp_hand_count
+    # ------------------------------------------------------------ match flow
+    def _start_match(self) -> None:
+        try:
+            self.match.start()
+        except Exception:
+            log.exception("Match failed to start; returning home.")
+            self.app.goto_home()
+            return
+        self.opp_hand_count = len(self.match.player(1).hand)
         self.champ = CardSprite(self.match.player(0).champion, self.champ_pos)
         self.champ.start_spawn()
         self.opp_champ = CardSprite(self.match.player(1).champion, self.opp_champ_pos)
         self.opp_champ.start_spawn()
         for i, card in enumerate(self.match.player(0).hand):
             self._schedule(0.10 * i, lambda c=card: self._spawn_hand_sprite(c))
+        self._schedule(0.10 * 7 + 0.5, self._enter_phase)
 
-    def _on_phase_event(self, event: dict) -> None:
-        self._flow_busy = not (event.get("your_turn") and
-                               event.get("phase") in ("main", "combat"))
+    def _spawn_hand_sprite(self, card: CardInstance) -> None:
+        sprite = CardSprite(card, self.deck_pos)
+        sprite.start_spawn()
+        self.hand.append(sprite)
+        self.app.audio.ui_sound("draw")
 
-    def _on_draw_event(self, event: dict) -> None:
-        if event.get("skipped"):
+    def _enter_phase(self) -> None:
+        if self.result is not None:
             return
-        if event.get("player") == 0 and not event.get("hidden"):
-            uid = event.get("card_uid")
-            card = self.match.find_in_hand(0, uid) if uid is not None else None
-            if event.get("burned") or card is None:
-                if event.get("burned"):
+        phase, local = self.match.phase, self.match.is_local_turn()
+        self._flow_busy = True
+        if phase is Phase.DRAW:
+            result = self.match.draw_step(self.match.active)
+            if local:
+                if result.card and not result.burned:
+                    self._spawn_hand_sprite(result.card)
+                elif result.burned:
                     self._show_toast("Hand full — card burned!")
-                return
-            sprite = CardSprite(card, self.deck_pos)
-            sprite.start_spawn()
-            self.hand.append(sprite)
-            self.app.audio.ui_sound("draw")
-        elif event.get("hidden") and not event.get("burned"):
-            self.opp_hand_count = self.controller.opp_hand_count
+            elif result.card and not result.burned:
+                self.opp_hand_count += 1
+            self._schedule(0.7, self._advance)
+        elif phase is Phase.MAIN:
+            if local:
+                self._flow_busy = False
+            else:
+                self._schedule(0.8, self._opponent_play_step)
+        elif phase is Phase.COMBAT:
+            if local:
+                self._flow_busy = False
+            else:
+                self._schedule(0.7, self._opponent_attack_step)
+        elif phase is Phase.END:
+            self._schedule(0.4, self._advance)
 
-    def _on_played_event(self, event: dict) -> None:
-        if event.get("player") == 0:
-            return  # our own plays are placed at intent time for responsiveness
-        data = event.get("card")
-        if data is None:
+    def _advance(self) -> None:
+        if self.result is not None:
             return
-        card = card_from_dict(data)
-        self.opp_hand_count = self.controller.opp_hand_count
+        self.match.advance_phase()
+        self._enter_phase()
+
+    def _opponent_play_step(self) -> None:
+        if self.result is not None:
+            return
+        choice = self.ai.choose_play(self.match)
+        if choice is None:
+            self._advance()
+            return
+        card, target_uid = choice
+        ok, reason, events = self.match.play_card(self.ai.index, card.uid, target_uid)
+        if not ok:
+            log.warning("Dummy opponent play rejected: %s", reason)
+            self._advance()
+            return
+        self.opp_hand_count = max(0, self.opp_hand_count - 1)
         w = self.app.screen.get_width()
         sprite = CardSprite(card, (w // 2, -60))
         self._place_played_sprite(sprite, owner=1)
+        self._apply_events(events, owner=1)
         self.app.audio.ui_sound("play")
+        self._schedule(0.85, self._opponent_play_step)
 
-    def _on_attack_event(self, event: dict) -> None:
-        owner = event["player"]
-        attacker = self._sprite_for(owner, event["attacker"])
-        target = self._sprite_for(1 - owner, event["target"])
-        if attacker is not None and target is not None:
-            attacker.start_lunge((target.x, target.y))
-            self.app.audio.ui_sound("attack")
-
-    def _on_damage_event(self, event: dict) -> None:
-        sprite = self._sprite_for(event["player"], event["uid"])
-        if sprite is not None:
-            self.floats.append(FloatText(f"-{event['amount']}",
-                                         (sprite.x, sprite.y - 30), HEALTH_RED))
+    def _opponent_attack_step(self) -> None:
+        if self.result is not None:
+            return
+        choice = self.ai.choose_attack(self.match)
+        if choice is None:
+            self._advance()
+            return
+        attacker_card, target_uid = choice
+        ok, reason, events = self.match.attack(self.ai.index,
+                                               attacker_card.uid, target_uid)
+        if not ok:
+            log.warning("Dummy opponent attack rejected: %s", reason)
+            self._advance()
+            return
+        self._animate_attack(events, attacker_owner=1)
+        self._schedule(1.05, self._opponent_attack_step)
 
     # ------------------------------------------------------------ event fx
     def _place_played_sprite(self, sprite: CardSprite, owner: int) -> None:
@@ -434,6 +419,45 @@ class MatchScene(Scene):
         if champ is not None:
             pools.append(champ)
         return next((s for s in pools if s.card.uid == uid), None)
+
+    def _apply_events(self, events: list[dict], owner: int) -> None:
+        for event in events:
+            kind = event.get("type")
+            if kind == "draw":
+                if event["player"] == 0:
+                    if event["burned"]:
+                        self._show_toast("Hand full — card burned!")
+                    else:
+                        self._spawn_hand_sprite(event["card"])
+                elif not event["burned"]:
+                    self.opp_hand_count += 1
+            elif kind == "destroy":
+                self._kill_sprite(event["player"], event["uid"])
+            elif kind == "mana" and event["player"] == 0 and event["amount"]:
+                self._show_toast("+1 maximum mana")
+
+    def _animate_attack(self, events: list[dict], attacker_owner: int) -> None:
+        """Lunge, then damage numbers, then deaths — staged for readability."""
+        head = events[0]
+        attacker = self._sprite_for(attacker_owner, head["attacker"])
+        target = self._sprite_for(1 - attacker_owner, head["target"])
+        if attacker is not None and target is not None:
+            attacker.start_lunge((target.x, target.y))
+            self.app.audio.ui_sound("attack")
+
+        def impact() -> None:
+            for event in events:
+                if event["type"] == "damage":
+                    sprite = self._sprite_for(event["player"], event["uid"])
+                    if sprite is not None:
+                        self.floats.append(FloatText(f"-{event['amount']}",
+                                                     (sprite.x, sprite.y - 30),
+                                                     HEALTH_RED))
+                elif event["type"] == "death":
+                    self._kill_sprite(event["player"], event["uid"])
+                elif event["type"] == "victory":
+                    self._finish(event["player"])
+        self._schedule(0.25, impact)
 
     def _kill_sprite(self, owner: int, uid: int) -> None:
         row = self.board if owner == 0 else self.opp_board
@@ -461,7 +485,7 @@ class MatchScene(Scene):
             self._cancel_drag()
             self._cancel_stage()
             self.attack_source = None
-            self.controller.pass_phase()
+            self._advance()
 
     def _leave(self) -> None:
         self.app.goto_home()
@@ -511,10 +535,14 @@ class MatchScene(Scene):
             sprite.tscale = 1.1
             self.btn_cancel.visible = True
             return
+        ok, reason, events = self.match.play_card(0, card.uid)
+        if not ok:
+            self._show_toast(reason)
+            return
         self.hand.remove(sprite)
         self._place_played_sprite(sprite, owner=0)
+        self._apply_events(events, owner=0)
         self.app.audio.ui_sound("play")
-        self.controller.play_card(card.uid)
 
     # ------------------------------------------------------------ staging
     def _cancel_stage(self) -> None:
@@ -530,13 +558,18 @@ class MatchScene(Scene):
         sprite = self.pending_spell
         if sprite is None:
             return
-        target_uid = target.card.uid
+        ok, reason, events = self.match.play_card(0, sprite.card.uid,
+                                                  target.card.uid)
+        if not ok:
+            self._show_toast(reason)
+            self._cancel_stage()
+            return
         self.pending_spell = None
         self.btn_cancel.visible = False
         self._target_uid = None
         self._place_played_sprite(sprite, owner=0)
+        self._apply_events(events, owner=0)
         self.app.audio.ui_sound("play")
-        self.controller.play_card(sprite.card.uid, target_uid)
 
     # ------------------------------------------------------------ target lookup
     def _spell_target_under(self, pos: tuple[int, int],
@@ -679,16 +712,16 @@ class MatchScene(Scene):
                         self._guard_flash = 1.0   # creatures block the champion
                         self._show_toast("Enemy creatures must be dealt with first.")
                     return                       # arrow released on nothing
-                ok, reason = self.match.can_attack(0, attacker.card.uid)
+                ok, reason, events = self.match.attack(0, attacker.card.uid,
+                                                       target.card.uid)
                 if not ok:
                     self._show_toast(reason)
                     return
-                self.controller.attack(attacker.card.uid, target.card.uid)
+                self._animate_attack(events, attacker_owner=0)
 
     def update(self, dt: float) -> None:
         self._time += dt
         self._run_timers(dt)
-        self._pump_controller(dt)
         self._toast_timer = max(0.0, self._toast_timer - dt)
         self._guard_flash = max(0.0, self._guard_flash - dt / 0.9)
 

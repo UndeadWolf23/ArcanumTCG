@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import itertools
 import logging
+import threading
+import time
 from abc import ABC, abstractmethod
 from enum import Enum, auto
 
@@ -39,7 +41,7 @@ class NetworkClient(ABC):
 
     # -- interface -------------------------------------------------------
     @abstractmethod
-    def connect(self, auth_token: str) -> None: ...
+    def connect(self, auth_token: str, name: str = "") -> None: ...
 
     @abstractmethod
     def disconnect(self) -> None: ...
@@ -56,7 +58,7 @@ class NetworkClient(ABC):
 class OfflineClient(NetworkClient):
     """Stand-in used until the game server exists. Never connects."""
 
-    def connect(self, auth_token: str) -> None:
+    def connect(self, auth_token: str, name: str = "") -> None:
         log.info("OfflineClient: connect() called — running in offline mode.")
         self.state = ConnectionState.DISCONNECTED
         self.bus.publish_threadsafe(Events.NET_DISCONNECTED, reason="offline_mode")
@@ -69,20 +71,133 @@ class OfflineClient(NetworkClient):
 
 
 class WebSocketClient(NetworkClient):
-    """Future production client (implementation plan, not yet wired):
+    """Production transport: `websocket-client` on a daemon thread.
 
-    * `websockets` (or `websocket-client`) on a daemon thread.
-    * connect(): open GAME_SERVER_URL, send HELLO with the Supabase JWT,
-      await WELCOME, then set CONNECTED and publish NET_CONNECTED.
-    * Heartbeat PING every 10s; missing 2 PONGs => RECONNECTING with
-      exponential backoff (1s, 2s, 4s... cap 30s), resume via match_id.
-    * Every inbound Envelope is published thread-safely as NET_MESSAGE.
+    Threading model (as designed): the network thread owns the socket; every
+    inbound envelope is handed to the main thread via the event bus queue.
+    Reconnects use exponential backoff (1s -> 2s -> 4s ... cap 30s).
     """
 
-    def connect(self, auth_token: str) -> None:
-        raise NotImplementedError("Game server transport not implemented yet.")
+    def __init__(self, bus: EventBus, url: str) -> None:
+        super().__init__(bus)
+        try:
+            import websocket  # noqa: F401  (websocket-client package)
+        except ImportError as exc:
+            raise RuntimeError(
+                "Online play needs the 'websocket-client' package: "
+                "pip install websocket-client") from exc
+        self.url = url.rstrip("/")
+        self.latency_ms: int | None = None
+        self.online_count: int | None = None
+        self._name = ""
+        self._token = ""
+        self._stop = threading.Event()
+        self._ws = None
+        self._thread: threading.Thread | None = None
+        self._pinger: threading.Thread | None = None
 
-    def disconnect(self) -> None: ...
+    # -- interface ---------------------------------------------------------
+    def connect(self, auth_token: str, name: str = "") -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._token, self._name = auth_token, name or "Adventurer"
+        self._stop.clear()
+        self.state = ConnectionState.CONNECTING
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="arcanum-net")
+        self._thread.start()
 
-    def send(self, msg_type: MsgType, payload: dict | None = None, match_id: str = "") -> None:
-        raise NotImplementedError("Game server transport not implemented yet.")
+    def disconnect(self) -> None:
+        self._stop.set()
+        ws = self._ws
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self.state = ConnectionState.DISCONNECTED
+
+    def send(self, msg_type: MsgType, payload: dict | None = None,
+             match_id: str = "") -> None:
+        ws = self._ws
+        if self.state is not ConnectionState.CONNECTED or ws is None:
+            log.debug("Not connected; dropped %s", msg_type.value)
+            return
+        try:
+            ws.send(self._make(msg_type, payload, match_id).encode())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Send failed (%s); connection will retry.", exc)
+
+    # -- network thread ------------------------------------------------------
+    def _run(self) -> None:
+        import websocket
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                log.info("Connecting to %s ...", self.url)
+                ws = websocket.create_connection(self.url, timeout=10)
+                ws.settimeout(30)
+                self._ws = ws
+                hello = self._make(MsgType.HELLO,
+                                   {"token": self._token, "name": self._name}, "")
+                ws.send(hello.encode())
+                backoff = 1.0
+                while not self._stop.is_set():
+                    raw = ws.recv()
+                    if raw:
+                        self._handle_raw(raw)
+            except Exception as exc:  # noqa: BLE001 - any transport failure
+                if self._stop.is_set():
+                    break
+                log.info("Connection lost (%s); retrying in %.0fs", exc, backoff)
+                self._on_dropped(str(exc))
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, 30.0)
+            finally:
+                self._ws = None
+        self.state = ConnectionState.DISCONNECTED
+
+    def _on_dropped(self, reason: str) -> None:
+        was_connected = self.state is ConnectionState.CONNECTED
+        self.state = ConnectionState.RECONNECTING
+        self.latency_ms = None
+        if was_connected:
+            self.bus.publish_threadsafe(Events.NET_DISCONNECTED, reason=reason)
+
+    # -- inbound (network thread; publish, never touch game state) ---------
+    def _handle_raw(self, raw: str | bytes) -> None:
+        try:
+            env = Envelope.decode(raw)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Bad envelope from server: %s", exc)
+            return
+        if env.type == MsgType.WELCOME.value:
+            self.state = ConnectionState.CONNECTED
+            self.online_count = int(env.payload.get("online", 0)) or None
+            log.info("Welcome from server v%s (%s online)",
+                     env.payload.get("server_version", "?"),
+                     env.payload.get("online", "?"))
+            self.bus.publish_threadsafe(Events.NET_CONNECTED,
+                                        payload=env.payload)
+            self._start_pinger()
+        elif env.type == MsgType.PONG.value:
+            sent = float(env.payload.get("echo_ts", 0.0))
+            if sent:
+                self.latency_ms = max(0, int((time.time() - sent) * 1000))
+            online = env.payload.get("online")
+            if online is not None:
+                self.online_count = int(online)
+        else:
+            self.bus.publish_threadsafe(Events.NET_MESSAGE, envelope=env)
+
+    def _start_pinger(self) -> None:
+        if self._pinger and self._pinger.is_alive():
+            return
+
+        def loop() -> None:
+            while not self._stop.wait(5.0):
+                if self.state is ConnectionState.CONNECTED:
+                    self.send(MsgType.PING, {"ts": time.time()})
+        self._pinger = threading.Thread(target=loop, daemon=True,
+                                        name="arcanum-ping")
+        self._pinger.start()
