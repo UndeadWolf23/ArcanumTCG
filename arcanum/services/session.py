@@ -18,14 +18,17 @@ log = logging.getLogger(__name__)
 class Session:
     def __init__(self) -> None:
         self.user: Optional[User] = None
+        self.access_token: str = ""     # in-memory only; never written to disk
 
     # -- state ---------------------------------------------------------------
     @property
     def logged_in(self) -> bool:
         return self.user is not None
 
-    def begin(self, user: User, remember_token: str = "", remember: bool = False) -> None:
+    def begin(self, user: User, remember_token: str = "", remember: bool = False,
+              access_token: str = "") -> None:
         self.user = user
+        self.access_token = access_token
         if remember and remember_token and not user.is_guest:
             self._write_token(remember_token)
         elif not remember:
@@ -33,6 +36,7 @@ class Session:
 
     def end(self) -> None:
         self.user = None
+        self.access_token = ""
         self.clear_saved_token()
 
     # -- remember-me token ------------------------------------------------

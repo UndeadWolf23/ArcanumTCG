@@ -184,6 +184,7 @@ class App:
 
     # ------------------------------------------------------------ session/net
     def _on_login(self, user, **_kw) -> None:
+        self.backend.refresh_deck_store()
         token = self.backend.session.saved_token() or "dev"
         try:
             self.backend.net.connect(token, name=user.username)
@@ -191,6 +192,7 @@ class App:
             log.exception("Could not start network client")
 
     def _on_logout(self, **_kw) -> None:
+        self.backend.refresh_deck_store()
         try:
             self.backend.net.disconnect()
         except Exception:  # noqa: BLE001
@@ -226,7 +228,8 @@ class App:
         if result is None:
             return
         if result.ok and result.user:
-            self.backend.session.begin(result.user, result.remember_token, remember=True)
+            self.backend.session.begin(result.user, result.remember_token, remember=True,
+                                       access_token=result.access_token)
             self.bus.publish(Events.AUTH_LOGIN_SUCCESS, user=result.user)
             self.goto_home()
         else:

@@ -45,6 +45,7 @@ class AuthResult:
     user: Optional[User] = None
     error: str = ""
     remember_token: str = ""
+    access_token: str = ""      # short-lived JWT for database (PostgREST) calls
 
 
 AuthCallback = Callable[[AuthResult], None]
@@ -291,7 +292,8 @@ class SupabaseAuthService(AuthService):
                     cb(AuthResult(ok=False, error="Unexpected server reply."))
                     return
                 cb(AuthResult(ok=True, user=user,
-                              remember_token=data.get("refresh_token", "")))
+                              remember_token=data.get("refresh_token", ""),
+                              access_token=data.get("access_token", "")))
             else:
                 cb(AuthResult(ok=False, error=self._friendly(status, data)))
         _run_async(work)
@@ -312,13 +314,16 @@ class SupabaseAuthService(AuthService):
                 return
             status, data = self._post("/signup", {
                 "email": email_clean, "password": password,
-                "data": {"username": username_clean},
+                "data": {"username": username_clean,
+                         "display_name": username_clean,
+                         "full_name": username_clean},
             })
             if status == 200 and data.get("access_token"):
                 # email confirmation is OFF: we're signed in immediately
                 user = self._user_from(data)
                 cb(AuthResult(ok=True, user=user,
-                              remember_token=data.get("refresh_token", "")))
+                              remember_token=data.get("refresh_token", ""),
+                              access_token=data.get("access_token", "")))
             elif status == 200:
                 # confirmation is ON: account made, must verify before login
                 cb(AuthResult(ok=False, error=(
@@ -339,7 +344,8 @@ class SupabaseAuthService(AuthService):
                     return
                 # tokens rotate — hand back the NEW one to persist
                 cb(AuthResult(ok=True, user=user,
-                              remember_token=data.get("refresh_token", token)))
+                              remember_token=data.get("refresh_token", token),
+                              access_token=data.get("access_token", "")))
             else:
                 cb(AuthResult(ok=False, error="Saved session expired."))
         _run_async(work)

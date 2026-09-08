@@ -192,7 +192,9 @@ class LoginScene(Scene):
                 self.error = result.error
             return
         if result.ok and result.user:
-            self.app.backend.session.begin(result.user, result.remember_token, self._remember)
+            self.app.backend.session.begin(result.user, result.remember_token,
+                                           self._remember,
+                                           access_token=result.access_token)
             self.app.bus.publish(Events.AUTH_LOGIN_SUCCESS, user=result.user)
             self.app.goto_home()
         else:

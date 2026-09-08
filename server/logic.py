@@ -12,8 +12,18 @@ from arcanum.services.net.protocol import Envelope, MsgType, ProtocolError
 
 log = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 HELLO_TIMEOUT = 10.0     # seconds to identify yourself before we hang up
+
+
+def wants_websocket(get_header) -> bool:
+    """True if the request is a websocket upgrade (not plain HTTP).
+
+    `get_header` is any callable like headers.get. Checks the Upgrade header,
+    which proxies (Cloudflare/Render) pass through untouched.
+    """
+    upgrade = get_header("Upgrade") or get_header("upgrade") or ""
+    return "websocket" in str(upgrade).lower()
 
 
 def parse_hello(raw: str | bytes) -> tuple[str, str]:

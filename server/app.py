@@ -21,52 +21,52 @@ import websockets
 
 from arcanum.services.net.protocol import Envelope, MsgType, ProtocolError
 from server import logic
-from server.sessions import MatchSession, Seat
+from server.lobby import Lobby
+from server.sessions import MatchSession
 
 log = logging.getLogger("arcanum.server")
 
 CONNECTED: set = set()
+LOBBY = Lobby()
 
 
 async def health_check(path, request_headers):
+    """Answer plain HTTP (Render health checks, browsers) with 200; let
+    websocket UPGRADE requests pass through to the real handshake."""
+    if logic.wants_websocket(request_headers.get):
+        return None                      # proceed with the websocket handshake
     if path in ("/", "/healthz"):
         body = f"arcanum-server {logic.SERVER_VERSION} ok\n".encode()
         return http.HTTPStatus.OK, [("Content-Type", "text/plain")], body
-    return None
+    return http.HTTPStatus.NOT_FOUND, [("Content-Type", "text/plain")], b"not found\n"
 
 
 class Connection:
-    """One client socket: identity, and the match they're seated in (if any)."""
+    """One client socket: identity, queue state, and their match seat."""
 
     def __init__(self, ws) -> None:
         self.ws = ws
         self.name = "Adventurer"
         self.session: MatchSession | None = None
         self.seat_index = 0
+        self.in_queue = False
 
     async def send(self, raw: str) -> None:
         await self.ws.send(raw)
 
-    async def start_ai_match(self) -> None:
-        if self.session is not None and not self.session.closed:
-            await self.send(logic.make_error(
-                "already_in_match", "You're already in a match.").encode())
-            return
-        seats = [Seat(self.name, self.send), Seat("Umbral Adept", None)]
-        self.session = MatchSession(seats)
-        self.seat_index = 0
-        log.info("%s started an AI match (%s).", self.name, self.session.match_id)
-        self.session.launch()
-
     async def route(self, env: Envelope) -> None:
         mtype = env.type
-        if mtype in (MsgType.PING.value, MsgType.QUEUE_LEAVE.value):
+        if mtype == MsgType.PING.value:
             reply = logic.handle_envelope(env, len(CONNECTED))
             if reply is not None:
                 await self.send(reply.encode())
             return
         if mtype == MsgType.QUEUE_JOIN.value:
-            await self.start_ai_match()   # dev: instant AI match
+            mode = str(env.payload.get("mode", "pvp")).lower()
+            await LOBBY.join(self, mode)
+            return
+        if mtype == MsgType.QUEUE_LEAVE.value:
+            await LOBBY.leave(self)
             return
         # in-match intents
         if mtype in (MsgType.INTENT_PLAY_CARD.value, MsgType.INTENT_ATTACK.value,
@@ -110,8 +110,12 @@ async def handler(websocket):
         log.exception("Unexpected error for %s", peer)
     finally:
         CONNECTED.discard(websocket)
-        if conn.session is not None and not conn.session.closed:
-            await conn.session.on_disconnect(conn.seat_index)
+        try:
+            await LOBBY.on_disconnect(conn)
+            if conn.session is not None and not conn.session.closed:
+                await conn.session.on_disconnect(conn.seat_index)
+        except Exception:  # noqa: BLE001
+            log.exception("Cleanup failed for %s", conn.name)
         log.info("%s disconnected — %d online", conn.name, len(CONNECTED))
 
 
