@@ -1,7 +1,8 @@
 """Home scene — the main menu hub after login.
 
-Play / Collection / Store are placeholders that will become their own scenes;
-the layout, transitions, and session plumbing they need already work.
+Play: when connected to the game server, requests a server-hosted match
+(the scene opens when the opening snapshot arrives). Offline, it starts a
+local practice match instead. Practice vs AI is always local.
 """
 from __future__ import annotations
 
@@ -9,8 +10,8 @@ import pygame
 
 from arcanum.core.constants import APP_NAME
 from arcanum.core.events import Events
-from arcanum.services.net.protocol import MsgType
 from arcanum.core.scene import Scene
+from arcanum.services.net.protocol import MsgType
 from arcanum.ui import theme
 from arcanum.ui.animation import Tween
 from arcanum.ui.widgets import Button, apply_cursor
@@ -18,38 +19,16 @@ from arcanum.ui.widgets import Button, apply_cursor
 
 class HomeScene(Scene):
     def on_enter(self, **kwargs) -> None:
-        self._awaiting_match = False
-        self.app.bus.subscribe(Events.NET_MESSAGE, self._on_net_message)
         self._time = 0.0
         self._intro = Tween(0.0, 1.0, 0.5)
         self.toast = ""
         self._toast_timer = 0.0
-        self._queued: str | None = None      # "ai" | "pvp" while waiting
-        self.app.bus.subscribe(Events.NET_MESSAGE, self._on_net)
+        self._awaiting_match = False
+        self.app.bus.subscribe(Events.NET_MESSAGE, self._on_net_message)
         self._build()
 
     def on_exit(self) -> None:
-        self.app.bus.unsubscribe(Events.NET_MESSAGE, self._on_net)
-
-    def on_exit(self) -> None:
         self.app.bus.unsubscribe(Events.NET_MESSAGE, self._on_net_message)
-
-    def _on_net_message(self, envelope, **_kw):
-        from arcanum.services.net.protocol import MsgType
-        if not self._awaiting_match:
-            return
-        if envelope.type == MsgType.EVENT_GAME_STATE.value:
-            self._awaiting_match = False
-            from arcanum.game.controller import RemoteController
-            from arcanum.scenes.match import MatchScene
-            controller = RemoteController(self.app.bus, self.app.backend.net,
-                                          envelope.match_id)
-            # feed this first snapshot immediately so the scene builds from it
-            controller._on_net_message(envelope)
-            self.app.scenes.switch(MatchScene(self.app), controller=controller)
-        elif envelope.type == MsgType.ERROR.value:
-            self._awaiting_match = False
-            self._show_toast(envelope.payload.get("message", "Matchmaking failed."))
 
     def on_resize(self, size: tuple[int, int]) -> None:
         if hasattr(self, "_time"):
@@ -58,13 +37,12 @@ class HomeScene(Scene):
     def _build(self) -> None:
         w, h = self.app.screen.get_size()
         ui = self.app.audio.ui_sound
-        btn_w, btn_h, gap = 340, 62, 18
+        btn_w, btn_h, gap = 340, 58, 16
         x = int(w * 0.5) - btn_w // 2
-        y = int(h * 0.42)
+        y = int(h * 0.40)
         entries = [
             ("Play", self._play, True),
             ("Practice vs AI", self._practice, False),
-            ("Versus  (online PvP)", self._versus, False),
             ("Collection", lambda: self._todo("Collection"), False),
             ("Store", lambda: self._todo("Store"), False),
             ("Settings", self._settings, False),
@@ -73,51 +51,57 @@ class HomeScene(Scene):
         self.widgets = []
         for i, (label, action, primary) in enumerate(entries):
             rect = pygame.Rect(x, y + i * (btn_h + gap), btn_w, btn_h)
-            self.widgets.append(Button(rect, label, action, primary=primary, sound_cb=ui))
+            self.widgets.append(Button(rect, label, action, primary=primary,
+                                       sound_cb=ui))
 
-    # -- actions ---------------------------------------------------------
+    # -- helpers -----------------------------------------------------------
     def _net_connected(self) -> bool:
         state = getattr(self.app.backend.net, "state", None)
         return getattr(state, "name", "") == "CONNECTED"
 
+    def _local_name(self) -> str:
+        user = self.app.backend.session.user
+        return user.username if user else "You"
+
+    def _start_local_match(self) -> None:
+        from arcanum.game.controller import LocalController
+        from arcanum.scenes.match import MatchScene
+        self.app.scenes.switch(
+            MatchScene(self.app),
+            controller=LocalController(local_name=self._local_name()))
+
+    # -- actions ---------------------------------------------------------
     def _play(self) -> None:
-        """Online match vs the server AI when connected; local practice
-        otherwise. Either way it's the same MatchScene."""
+        """Server-hosted match when online; local practice otherwise."""
         if self._net_connected():
-            self._queued = "ai"
-            self.app.backend.matchmaking.join_queue("ai")
+            if self._awaiting_match:
+                self._show_toast("Already finding a match...")
+                return
+            self._awaiting_match = True
             self._show_toast("Summoning an opponent...")
+            self.app.backend.net.send(MsgType.QUEUE_JOIN, {"mode": "casual"})
         else:
-            from arcanum.scenes.match import MatchScene
-            self.app.scenes.switch(MatchScene(self.app))
+            self._show_toast("Offline — starting a practice match.")
+            self._start_local_match()
 
-    def _versus(self) -> None:
-        if not self._net_connected():
-            self._show_toast("Versus needs a server connection.")
-            return
-        if self._queued == "pvp":
-            self._queued = None
-            self.app.backend.matchmaking.leave_queue()
-            self._show_toast("Left the queue.")
-            return
-        self._queued = "pvp"
-        self.app.backend.matchmaking.join_queue("pvp")
-        self._show_toast("Queued for Versus - waiting for a challenger...")
+    def _practice(self) -> None:
+        self._start_local_match()
 
-    def _on_net(self, envelope=None, **_kw) -> None:
-        if envelope is None:
+    def _on_net_message(self, envelope=None, **_kw) -> None:
+        if envelope is None or not self._awaiting_match:
             return
-        if envelope.type == MsgType.MATCH_FOUND.value:
-            opponent = envelope.payload.get("opponent", "an opponent")
-            self._show_toast(f"Match found vs {opponent}!")
-        elif envelope.type == MsgType.EVENT_GAME_STATE.value and self._queued:
-            self._queued = None
+        if envelope.type == MsgType.EVENT_GAME_STATE.value:
+            self._awaiting_match = False
+            from arcanum.game.controller import RemoteController
             from arcanum.scenes.match import MatchScene
-            self.app.scenes.switch(MatchScene(self.app),
-                                   snapshot=envelope.payload)
-        elif envelope.type == MsgType.QUEUE_JOIN.value:
-            if envelope.payload.get("status") == "waiting":
-                self._show_toast("In queue - waiting for a challenger...")
+            controller = RemoteController(self.app.bus, self.app.backend.net,
+                                          envelope.match_id)
+            controller._on_net_message(envelope)   # seed the first snapshot
+            self.app.scenes.switch(MatchScene(self.app), controller=controller)
+        elif envelope.type == MsgType.ERROR.value:
+            self._awaiting_match = False
+            self._show_toast(envelope.payload.get("message",
+                                                  "Matchmaking failed."))
 
     def _settings(self) -> None:
         from arcanum.scenes.settings import SettingsScene
@@ -155,27 +139,32 @@ class HomeScene(Scene):
         cx = w // 2
         alpha = int(255 * self._intro.value)
 
-        theme.draw_text(surface, APP_NAME.upper(), (cx, int(h * 0.18)),
+        theme.draw_text(surface, APP_NAME.upper(), (cx, int(h * 0.16)),
                         theme.display_font(56, bold=True), theme.GOLD_BRIGHT,
                         anchor="center", alpha=alpha)
-        theme.gold_gradient_rule(surface, (cx, int(h * 0.18) + 42), 280)
+        theme.gold_gradient_rule(surface, (cx, int(h * 0.16) + 42), 280)
 
         user = self.app.backend.session.user
         if user:
-            tag = f"Signed in as  {user.username}" + ("  ·  temp account" if user.is_guest else "")
-            theme.draw_text(surface, tag, (cx, int(h * 0.18) + 66),
-                            theme.body_font(16), theme.TEXT_DIM, anchor="center", alpha=alpha)
+            tag = f"Signed in as  {user.username}"
+            if user.is_guest:
+                tag += "  ·  temp account"
+            theme.draw_text(surface, tag, (cx, int(h * 0.16) + 66),
+                            theme.body_font(16), theme.TEXT_DIM,
+                            anchor="center", alpha=alpha)
+
+        for widget in self.widgets:
+            widget.draw(surface)
 
         # server connection status (bottom-left)
         net = self.app.backend.net
-        state = getattr(net, "state", None)
-        state_name = getattr(state, "name", "DISCONNECTED")
+        state_name = getattr(getattr(net, "state", None), "name", "DISCONNECTED")
         if state_name == "CONNECTED":
-            latency = getattr(net, "latency_ms", None)
-            online = getattr(net, "online_count", None)
             bits = ["Online"]
+            online = getattr(net, "online_count", None)
             if online:
                 bits.append(f"{online} in the aether")
+            latency = getattr(net, "latency_ms", None)
             if latency is not None:
                 bits.append(f"{latency} ms")
             status, color = "  ·  ".join(bits), theme.SUCCESS
@@ -186,9 +175,6 @@ class HomeScene(Scene):
             status, color = "Offline — practice only", theme.TEXT_FAINT
         theme.draw_text(surface, status, (24, h - 18), theme.body_font(14),
                         color, anchor="bottomleft")
-
-        for widget in self.widgets:
-            widget.draw(surface)
 
         if self._toast_timer > 0 and self.toast:
             fade = min(1.0, self._toast_timer / 0.4)
