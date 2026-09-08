@@ -104,7 +104,7 @@ def starter_collection() -> dict[str, int]:
 
 
 def max_copies(card_id: str) -> int:
-    card = BY_ID.get(card_id)
+    card = by_id(card_id)
     if card is None:
         return 0
     return min(MAX_COPIES, COPIES_BY_RARITY[card.rarity])
@@ -115,7 +115,7 @@ def validate_deck(cards: dict[str, int],
     """Deck legality: size, per-card limits, ownership, known cards."""
     total = 0
     for card_id, count in cards.items():
-        card = BY_ID.get(card_id)
+        card = by_id(card_id)
         if card is None:
             return False, f"Unknown card: {card_id}"
         if count < 1:
@@ -128,3 +128,63 @@ def validate_deck(cards: dict[str, int],
     if total != DECK_SIZE:
         return False, f"Decks must be exactly {DECK_SIZE} cards ({total} now)."
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Official (database) cards — merged into the browsable/playable pool
+# ---------------------------------------------------------------------------
+_TYPE_TO_KIND = {"hero": Kind.CREATURE, "spell": Kind.SPELL,
+                 "relic": Kind.RELIC}
+
+
+def _spec_to_def(spec) -> CardDef | None:
+    """Adapt a database CardSpec into today's engine vocabulary. Champions,
+    minions, and barriers return None until their zones land (engine v2)."""
+    kind = _TYPE_TO_KIND.get(spec.card_type.value)
+    if kind is None:
+        return None
+    return CardDef(
+        card_id=spec.id, name=spec.name, kind=kind, cost=spec.cost,
+        rarity=Rarity(spec.rarity.value), attack=spec.attack,
+        health=spec.health, text=spec.composed_text(),
+        haste=spec.has_keyword("rush"),
+    )
+
+
+def all_cards() -> tuple[CardDef, ...]:
+    """Built-in starter set + playable official cards from the database."""
+    from arcanum.services.cards import official_cards
+    extra = []
+    for spec in official_cards():
+        if spec.id in BY_ID:
+            continue
+        card = _spec_to_def(spec)
+        if card is not None:
+            extra.append(card)
+    return CATALOG + tuple(extra)
+
+
+def by_id(card_id: str) -> CardDef | None:
+    if card_id in BY_ID:
+        return BY_ID[card_id]
+    for card in all_cards():
+        if card.card_id == card_id:
+            return card
+    return None
+
+
+def official_keywords(card_id: str) -> dict:
+    """Keyword dict for a database card (for the match engine)."""
+    from arcanum.services.cards import official_cards
+    for spec in official_cards():
+        if spec.id == card_id:
+            return {ref.id: ref.value for ref in spec.keywords}
+    return {}
+
+
+def full_collection() -> dict[str, int]:
+    """Starter set + every collectible official card (economy later)."""
+    owned = starter_collection()
+    for card in all_cards():
+        owned.setdefault(card.card_id, COPIES_BY_RARITY[card.rarity])
+    return owned

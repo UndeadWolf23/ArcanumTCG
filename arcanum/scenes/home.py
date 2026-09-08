@@ -339,6 +339,22 @@ class HomeScene(Scene):
                      force_hand=(self._nav_hover is not None
                                  or self._panel_hover is not None))
 
+    def _coin_icon(self, size: int):
+        cached = getattr(self, "_coin_cache", None)
+        if cached and cached[0] == size:
+            return cached[1]
+        icon = None
+        for path in (IMAGES_DIR / "coin.png", ROOT_DIR / "coin.png"):
+            if path.is_file():
+                try:
+                    raw = pygame.image.load(str(path)).convert_alpha()
+                    icon = pygame.transform.smoothscale(raw, (size, size))
+                    break
+                except pygame.error:
+                    pass
+        self._coin_cache = (size, icon)
+        return icon
+
     # ------------------------------------------------------ loading overlay
     def _draw_loading(self, surface: pygame.Surface) -> None:
         w, h = surface.get_size()
@@ -404,15 +420,21 @@ class HomeScene(Scene):
                 pygame.draw.line(surface, theme.GOLD,
                                  (rect.x + 6, bar.bottom - 2),
                                  (rect.right - 6, bar.bottom - 2), 2)
-        # currency chips (economy placeholder)
+        # currency chips: coins (coin.png) + essence placeholder
         chip_x = w - int(300 * s)
-        for icon_color, amount in ((theme.GOLD, "1,000"),
-                                   ((86, 156, 255), "50")):
+        coin = self._coin_icon(int(22 * s))
+        for icon, icon_color, amount in ((coin, theme.GOLD, "1,000"),
+                                         (None, (86, 156, 255), "50")):
             chip = pygame.Rect(chip_x, int(18 * s), int(96 * s), int(32 * s))
             theme.draw_panel(surface, chip, fill=theme.NAVY,
                              border=theme.NAVY_EDGE, radius=16)
-            pygame.draw.circle(surface, icon_color,
-                               (chip.x + int(16 * s), chip.centery), int(9 * s))
+            if icon is not None:
+                surface.blit(icon, icon.get_rect(
+                    center=(chip.x + int(17 * s), chip.centery)))
+            else:
+                pygame.draw.circle(surface, icon_color,
+                                   (chip.x + int(16 * s), chip.centery),
+                                   int(9 * s))
             theme.draw_text(surface, amount,
                             (chip.x + int(32 * s), chip.centery),
                             theme.body_font(int(14 * s)), theme.TEXT,

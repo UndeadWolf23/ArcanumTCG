@@ -18,8 +18,9 @@ from typing import Callable, Optional
 import pygame
 
 from arcanum.core.scene import Scene
-from arcanum.game.catalog import (BY_ID, CATALOG, DECK_SIZE, CardDef, Rarity,
-                                  max_copies, starter_collection, validate_deck)
+from arcanum.game import catalog as cat
+from arcanum.game.catalog import (DECK_SIZE, CardDef, Rarity, max_copies,
+                                  validate_deck)
 from arcanum.game.match import Kind
 from arcanum.services.decks import DeckRecord, DeckResult
 from arcanum.ui import theme
@@ -41,7 +42,7 @@ COST_FILTERS = [("Any cost", None), ("1-2", (1, 2)), ("3-4", (3, 4)),
 def filter_cards(query: str, kind: Optional[Kind],
                  cost: Optional[tuple[int, int]]) -> list[CardDef]:
     out = []
-    for card in CATALOG:
+    for card in cat.all_cards():
         if kind is not None and card.kind is not kind:
             continue
         if cost is not None and not (cost[0] <= card.cost <= cost[1]):
@@ -55,7 +56,7 @@ def filter_cards(query: str, kind: Optional[Kind],
 
 class DeckBuilderScene(Scene):
     def on_enter(self, **kwargs) -> None:
-        self.collection = starter_collection()
+        self.collection = cat.full_collection()
         self.deck = DeckRecord(id="", name="New Deck", cards={})
         self.saved: list[DeckRecord] = []
         self.scroll = 0.0
@@ -246,7 +247,7 @@ class DeckBuilderScene(Scene):
     def _deck_rows(self) -> list[tuple[str, pygame.Rect]]:
         rows = []
         entries = sorted(self.deck.cards.items(),
-                         key=lambda kv: (BY_ID[kv[0]].cost, BY_ID[kv[0]].name))
+                         key=lambda kv: (cat.by_id(kv[0]).cost, cat.by_id(kv[0]).name))
         for i, (card_id, _count) in enumerate(entries):
             rect = pygame.Rect(self.side_rect.x + int(12 * self.s),
                                self.list_top + i * self.row_h,
@@ -306,7 +307,7 @@ class DeckBuilderScene(Scene):
         else:
             for card_id, rect in self._deck_rows():
                 if rect.collidepoint(mouse):
-                    self._hover_card = BY_ID.get(card_id)
+                    self._hover_card = cat.by_id(card_id)
                     break
         apply_cursor(self.widgets, force_hand=self._hover_card is not None)
 
@@ -391,7 +392,7 @@ class DeckBuilderScene(Scene):
 
         # deck rows
         for card_id, rect in self._deck_rows():
-            card = BY_ID[card_id]
+            card = cat.by_id(card_id)
             count = self.deck.cards[card_id]
             hover = card is self._hover_card
             if hover:
@@ -424,7 +425,7 @@ class DeckBuilderScene(Scene):
         # curve: bars for costs 1..7+
         counts = [0] * 7
         for card_id, count in self.deck.cards.items():
-            counts[min(6, BY_ID[card_id].cost - 1)] += count
+            counts[min(6, cat.by_id(card_id).cost - 1)] += count
         peak = max(counts) or 1
         bar_w = int(20 * s)
         total_w = 7 * bar_w + 6 * int(6 * s)

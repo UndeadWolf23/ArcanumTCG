@@ -19,6 +19,7 @@ def card_to_dict(card: CardInstance) -> dict[str, Any]:
         "max_health": card.max_health, "exhausted": card.exhausted,
         "sick": card.sick, "haste": card.haste, "text": card.text,
         "effect": card.effect.value, "needs_target": card.needs_target,
+        "keywords": dict(card.keywords),
     }
 
 
@@ -32,6 +33,7 @@ def card_from_dict(data: dict[str, Any]) -> CardInstance:
         sick=bool(data.get("sick", False)), haste=bool(data.get("haste", False)),
         text=str(data.get("text", "")), effect=Effect(data.get("effect", "none")),
         needs_target=bool(data.get("needs_target", False)),
+        keywords=dict(data.get("keywords", {})),
     )
 
 

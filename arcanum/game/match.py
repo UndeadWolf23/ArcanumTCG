@@ -73,6 +73,16 @@ class CardInstance:
     exhausted: bool = False     # has attacked this turn
     sick: bool = False          # summoned this turn; cannot attack yet
     haste: bool = False         # "unless otherwise specified": skips sickness
+    keywords: dict = field(default_factory=dict)   # kw_id -> value (or None)
+    thorns_used: bool = False   # Thorns triggers once per turn
+    undying_spent: bool = False # Undying triggers once ever
+
+    def has_kw(self, kw_id: str) -> bool:
+        return kw_id in self.keywords
+
+    def kw_value(self, kw_id: str, default: int = 0) -> int:
+        value = self.keywords.get(kw_id)
+        return default if value is None else int(value)
     text: str = ""
     effect: Effect = Effect.NONE
     needs_target: bool = False
@@ -202,6 +212,7 @@ class MatchState:
         for creature in player.board:
             creature.exhausted = False
             creature.sick = False
+            creature.thorns_used = False
 
     # ------------------------------------------------------------ phases
     def advance_phase(self) -> Phase:
@@ -283,7 +294,7 @@ class MatchState:
         events: list[Event] = [{"type": "played", "player": index, "card": card}]
 
         if card.kind is Kind.CREATURE:
-            card.sick = not card.haste
+            card.sick = not (card.haste or card.has_kw("rush"))
             player.board.append(card)
         elif card.kind is Kind.RELIC:
             player.relics.append(card)
@@ -354,32 +365,119 @@ class MatchState:
         attacker.exhausted = True
         events: list[Event] = [{"type": "attack", "player": index,
                                 "attacker": attacker_uid, "target": target_uid}]
+        me = self.players[index]
 
-        # attacker hits the target
-        target.health -= attacker.attack
-        events.append({"type": "damage", "player": 1 - index, "uid": target.uid,
-                       "amount": attacker.attack, "health": target.health})
-        # creatures (not champions) strike back
-        if target.kind is Kind.CREATURE and target.attack > 0:
-            attacker.health -= target.attack
-            events.append({"type": "damage", "player": index,
-                           "uid": attacker.uid, "amount": target.attack,
-                           "health": attacker.health})
+        def owner_of(card) -> int:
+            return index if (card in me.board or card is me.champion) else 1 - index
 
-        # deaths — health persists between combats, so anything at 0 dies now
-        if target.kind is Kind.CREATURE and target.health <= 0:
-            enemy.board.remove(target)
-            events.append({"type": "death", "player": 1 - index,
-                           "uid": target.uid})
-        if attacker.health <= 0:
-            self.players[index].board.remove(attacker)
-            events.append({"type": "death", "player": index,
-                           "uid": attacker.uid})
-        # champion defeat ends the match
-        if target.kind is Kind.CHAMPION and target.health <= 0:
-            self.winner = index
-            events.append({"type": "victory", "player": index})
-            log.info("%s wins the match!", self.players[index].name)
+        def hit(source, victim, amount: int, combat: bool) -> None:
+            """One packet of damage, with on-damage keyword triggers."""
+            if amount <= 0 or victim.health <= 0:
+                return
+            victim_owner = owner_of(victim)
+            victim.health -= amount
+            events.append({"type": "damage", "player": victim_owner,
+                           "uid": victim.uid, "amount": amount,
+                           "health": victim.health})
+            source_owner = owner_of(source)
+            # Soul Link: dealing damage heals your champion that much
+            champ = self.players[source_owner].champion
+            if source.has_kw("soul_link") and champ is not None:
+                champ.health += amount
+                events.append({"type": "heal", "player": source_owner,
+                               "uid": champ.uid, "amount": amount,
+                               "health": champ.health})
+            if victim.kind is Kind.CREATURE:
+                # Lethal: any damage to a hero destroys it
+                if source.has_kw("lethal") and source.kind is Kind.CREATURE:
+                    victim.health = min(victim.health, 0)
+                    events.append({"type": "keyword", "keyword": "lethal",
+                                   "player": source_owner, "uid": source.uid})
+                # Execute: damaging a hero left at 3 or less destroys it
+                elif source.has_kw("execute") and 0 < victim.health <= 3:
+                    victim.health = 0
+                    events.append({"type": "keyword", "keyword": "execute",
+                                   "player": source_owner, "uid": source.uid})
+                # Thorns: first damage each turn bites the source back
+                if (victim.has_kw("thorns") and not victim.thorns_used
+                        and combat and source.kind is Kind.CREATURE
+                        and source.health > 0):
+                    victim.thorns_used = True
+                    events.append({"type": "keyword", "keyword": "thorns",
+                                   "player": victim_owner, "uid": victim.uid})
+                    hit(victim, source, victim.kw_value("thorns", 1),
+                        combat=False)
+
+        enemy_champ = enemy.champion
+        if target.kind is Kind.CREATURE:
+            pre_health = target.health
+            attacker_quick = attacker.has_kw("quick") and not target.has_kw("quick")
+            target_quick = target.has_kw("quick") and not attacker.has_kw("quick")
+            strikes = [(attacker, target), (target, attacker)]
+            if target_quick:
+                strikes.reverse()
+            first_src, first_victim = strikes[0]
+            hit(first_src, first_victim, first_src.attack, combat=True)
+            # Quick: if the quick side killed, the slow side never swings
+            second_src, second_victim = strikes[1]
+            quick_stopped = ((attacker_quick or target_quick)
+                             and second_src.health <= 0)
+            if second_src.attack > 0 and second_src.health > 0 \
+                    and not quick_stopped:
+                hit(second_src, second_victim, second_src.attack, combat=True)
+            # Crush: excess damage spills onto the defending champion
+            if (attacker.has_kw("crush") and target.health < 0
+                    and enemy_champ is not None):
+                events.append({"type": "keyword", "keyword": "crush",
+                               "player": index, "uid": attacker.uid})
+                hit(attacker, enemy_champ, -target.health, combat=False)
+            # Pierce: combat damage to a hero pokes their champion for 1
+            if (attacker.has_kw("pierce") and target.health < pre_health
+                    and enemy_champ is not None):
+                events.append({"type": "keyword", "keyword": "pierce",
+                               "player": index, "uid": attacker.uid})
+                hit(attacker, enemy_champ, 1, combat=False)
+        else:
+            hit(attacker, target, attacker.attack, combat=True)
+
+        # deaths — with Undying and Feast woven in
+        def resolve_death(card) -> None:
+            owner = owner_of(card)
+            side = self.players[owner]
+            if card in side.board and card.health <= 0:
+                if card.has_kw("undying") and not card.undying_spent:
+                    card.undying_spent = True
+                    card.health = 1
+                    events.append({"type": "keyword", "keyword": "undying",
+                                   "player": owner, "uid": card.uid,
+                                   "health": 1})
+                    return
+                side.board.remove(card)
+                events.append({"type": "death", "player": owner,
+                               "uid": card.uid})
+                killer = attacker if card is target else target
+                if (killer.kind is Kind.CREATURE and killer.has_kw("feast")
+                        and killer.health > 0):
+                    killer_owner = owner_of(killer)
+                    who = self.players[killer_owner]
+                    if who.mana < MAX_MANA:
+                        who.mana += 1
+                    events.append({"type": "keyword", "keyword": "feast",
+                                   "player": killer_owner, "uid": killer.uid,
+                                   "mana": who.mana})
+
+        if target.kind is Kind.CREATURE:
+            resolve_death(target)
+        resolve_death(attacker)
+
+        # champion defeat ends the match (Crush/Pierce can finish one too)
+        for champ_owner in (1 - index, index):
+            champ = self.players[champ_owner].champion
+            if champ is not None and champ.health <= 0 and self.winner is None:
+                self.winner = 1 - champ_owner
+                events.append({"type": "victory", "player": 1 - champ_owner})
+                log.info("%s wins the match!",
+                         self.players[1 - champ_owner].name)
         return True, "", events
 
 

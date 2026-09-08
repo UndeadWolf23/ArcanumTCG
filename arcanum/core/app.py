@@ -184,6 +184,9 @@ class App:
 
     # ------------------------------------------------------------ session/net
     def _on_login(self, user, **_kw) -> None:
+        from arcanum.services import cards as card_library
+        card_library.load_cache()
+        card_library.refresh()
         self.backend.refresh_deck_store()
         token = self.backend.session.saved_token() or "dev"
         try:

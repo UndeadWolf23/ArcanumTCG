@@ -1130,25 +1130,73 @@ class MatchScene(Scene):
         rect.center = self.deck_pos
         self._draw_card_back(surface, rect)
 
+    def _energy_icons(self, size: int):
+        """Three cached states of the energy crystal: bright (available),
+        grey (spent this turn), silhouette (not yet unlocked)."""
+        cached = getattr(self, "_energy_cache", None)
+        if cached and cached[0] == size:
+            return cached[1]
+        base = None
+        for path in (IMAGES_DIR / "energy.png", ROOT_DIR / "energy.png"):
+            if path.is_file():
+                try:
+                    base = pygame.image.load(str(path)).convert_alpha()
+                    break
+                except pygame.error:
+                    pass
+        if base is None:
+            self._energy_cache = (size, None)
+            return None
+        bright = pygame.transform.smoothscale(base, (size, size))
+        # spent: desaturated + dimmed
+        spent = bright.copy()
+        grey = pygame.Surface((size, size), pygame.SRCALPHA)
+        grey.fill((120, 120, 130, 0))
+        spent.blit(grey, (0, 0), special_flags=pygame.BLEND_RGB_MIN)
+        spent.set_alpha(150)
+        # locked: near-black silhouette
+        locked = bright.copy()
+        dark = pygame.Surface((size, size), pygame.SRCALPHA)
+        dark.fill((16, 22, 40, 0))
+        locked.blit(dark, (0, 0), special_flags=pygame.BLEND_RGB_MIN)
+        locked.set_alpha(105)
+        icons = {"bright": bright, "spent": spent, "locked": locked}
+        self._energy_cache = (size, icons)
+        return icons
+
     def _draw_mana(self, surface: pygame.Surface) -> None:
         player = self.match.player(0)
         h = surface.get_height()
+        size = 24
+        step = size + 4
         x = 34
-        top = h // 2 - (MAX_MANA * 22) // 2
+        top = h // 2 - (MAX_MANA * step) // 2
         theme.draw_text(surface, f"{player.mana}/{player.max_mana}",
-                        (x + 10, top - 26), theme.body_font(18, bold=True),
-                        MANA_CORE, anchor="center")
+                        (x + size // 2, top - 24),
+                        theme.body_font(18, bold=True), MANA_CORE,
+                        anchor="center")
+        icons = self._energy_icons(size)
         for i in range(MAX_MANA):
-            cy = top + i * 22
-            points = [(x, cy - 8), (x + 8, cy), (x, cy + 8), (x - 8, cy)]
-            if i < player.mana:
-                pygame.draw.polygon(surface, MANA_FILL, points)
-                pygame.draw.polygon(surface, MANA_CORE, points, width=1)
-            elif i < player.max_mana:
-                pygame.draw.polygon(surface, MANA_SPENT, points)
-                pygame.draw.polygon(surface, MANA_FILL, points, width=1)
-            else:
-                pygame.draw.polygon(surface, theme.NAVY_EDGE, points, width=1)
+            cy = top + i * step
+            if icons is not None:
+                if i < player.mana:
+                    icon = icons["bright"]
+                elif i < player.max_mana:
+                    icon = icons["spent"]
+                else:
+                    icon = icons["locked"]
+                surface.blit(icon, (x - size // 2 + size // 2 - size // 2, cy))
+            else:                                  # fallback: old diamonds
+                mid = cy + size // 2
+                points = [(x + 8, mid - 8), (x + 16, mid), (x + 8, mid + 8),
+                          (x, mid)]
+                if i < player.mana:
+                    pygame.draw.polygon(surface, MANA_FILL, points)
+                elif i < player.max_mana:
+                    pygame.draw.polygon(surface, MANA_SPENT, points)
+                else:
+                    pygame.draw.polygon(surface, theme.NAVY_EDGE, points,
+                                        width=1)
 
     def _draw_phase_tracker(self, surface: pygame.Surface) -> None:
         w, h = surface.get_size()
