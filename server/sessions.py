@@ -45,6 +45,8 @@ def redact_events(events: list[dict[str, Any]], viewer: int) -> list[dict[str, A
         event = dict(event)
         if "player" in event:
             event["player"] = 0 if event["player"] == viewer else 1
+        if event.get("type") == "phase" and "active" in event:
+            event["your_turn"] = event.pop("active") == viewer
         card = event.pop("card", None)
         if event.get("type") == "played" and card is not None:
             event["card"] = card_to_dict(card)
@@ -138,10 +140,10 @@ class MatchSession:
             if seat.is_ai:
                 await self._ai_phase(phase)
             else:
+                # the pass intent itself performs the advance (handler below),
+                # then wakes this pump to evaluate the next phase
                 self._pass_event.clear()
                 await self._pass_event.wait()
-                if not self.closed and self.match.winner is None:
-                    await self._advance()
         elif phase is Phase.END:
             await asyncio.sleep(END_DELAY)
             await self._advance()
@@ -179,6 +181,7 @@ class MatchSession:
             if (self.match.active == seat_index
                     and self.match.phase in (Phase.MAIN, Phase.COMBAT)
                     and self.match.winner is None):
+                await self._advance()
                 self._pass_event.set()
             return
         if mtype == MsgType.INTENT_CONCEDE.value:

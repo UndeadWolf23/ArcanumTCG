@@ -367,7 +367,10 @@ class MatchScene(Scene):
             self._schedule(0.10 * i, lambda c=card: self._spawn_hand_sprite(c))
 
     def _on_phase_event(self, event: dict) -> None:
-        self._flow_busy = not (event.get("your_turn") and
+        your_turn = event.get("your_turn")
+        if your_turn is None:                      # fall back to the mirror
+            your_turn = self.match.is_local_turn()
+        self._flow_busy = not (your_turn and
                                event.get("phase") in ("main", "combat"))
 
     def _on_draw_event(self, event: dict) -> None:
@@ -389,7 +392,18 @@ class MatchScene(Scene):
 
     def _on_played_event(self, event: dict) -> None:
         if event.get("player") == 0:
-            return  # our own plays are placed at intent time for responsiveness
+            # placed at intent time; rebind the sprite to the live mirror
+            # object in case the state sync created a fresh instance
+            data = event.get("card") or {}
+            uid = int(data.get("uid", -1))
+            live = next((c for c in (*self.match.player(0).board,
+                                     *self.match.player(0).relics)
+                         if c.uid == uid), None)
+            if live is not None:
+                for sprite in (*self.board, *self.relics, *self.effects):
+                    if sprite.card.uid == uid and sprite.card is not live:
+                        sprite.card = live
+            return
         data = event.get("card")
         if data is None:
             return

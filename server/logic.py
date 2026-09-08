@@ -12,7 +12,7 @@ from arcanum.services.net.protocol import Envelope, MsgType, ProtocolError
 
 log = logging.getLogger(__name__)
 
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.2.1"
 HELLO_TIMEOUT = 10.0     # seconds to identify yourself before we hang up
 
 

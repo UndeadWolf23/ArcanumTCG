@@ -76,14 +76,17 @@ def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:
     }
 
 
-def _sync_list(existing: list[CardInstance], incoming: list[dict]) -> None:
-    """In-place sync of a card zone: preserve object identity by uid."""
-    by_uid = {c.uid: c for c in existing}
+def _sync_list(existing: list[CardInstance], incoming: list[dict],
+               pool: dict[int, CardInstance]) -> None:
+    """In-place zone sync. `pool` maps uid -> existing object across ALL of
+    the player's zones, so a card moving hand -> board keeps its identity
+    (sprites hold references; sick/health updates must reach them)."""
     new_list: list[CardInstance] = []
     for data in incoming:
-        card = by_uid.get(int(data["uid"]))
+        card = pool.get(int(data["uid"]))
         if card is None:
             card = card_from_dict(data)
+            pool[card.uid] = card
         else:
             _update_card(card, data)
         new_list.append(card)
@@ -99,16 +102,20 @@ def apply_snapshot(mirror: MatchState, snap: dict[str, Any]) -> None:
         player.name = data.get("name", player.name)
         player.mana = int(data["mana"])
         player.max_mana = int(data["max_mana"])
+        pool: dict[int, CardInstance] = {
+            c.uid: c for c in (*player.hand, *player.board, *player.relics)}
+        if player.champion is not None:
+            pool[player.champion.uid] = player.champion
         champ_data = data.get("champion")
         if champ_data:
             if player.champion is None or player.champion.uid != int(champ_data["uid"]):
                 player.champion = card_from_dict(champ_data)
             else:
                 _update_card(player.champion, champ_data)
-        _sync_list(player.board, data.get("board", []))
-        _sync_list(player.relics, data.get("relics", []))
-
-    _sync_list(you.hand, you_data.get("hand", []))
+        _sync_list(player.board, data.get("board", []), pool)
+        _sync_list(player.relics, data.get("relics", []), pool)
+        if player is you:
+            _sync_list(player.hand, data.get("hand", []), pool)
     # opponent hand stays empty in the mirror; the count travels separately
 
     mirror.phase = Phase(snap["phase"])

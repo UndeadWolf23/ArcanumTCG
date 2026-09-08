@@ -12,7 +12,7 @@ import math
 
 import pygame
 
-from arcanum.core.constants import APP_NAME
+from arcanum.core.constants import APP_NAME, IMAGES_DIR, ROOT_DIR
 from arcanum.core.events import Events
 from arcanum.core.scene import Scene
 from arcanum.services.net.protocol import MsgType
@@ -32,6 +32,19 @@ SLIDES = (
 )
 
 
+def _load_art(name: str):
+    """Load a background image (assets/images first, project root fallback)."""
+    for path in (IMAGES_DIR / name, ROOT_DIR / name):
+        if path.is_file():
+            try:
+                return pygame.image.load(str(path)).convert()
+            except pygame.error as exc:
+                import logging
+                logging.getLogger(__name__).warning("Could not load %s: %s",
+                                                    path, exc)
+    return None
+
+
 class HomeScene(Scene):
     def on_enter(self, **kwargs) -> None:
         self._time = 0.0
@@ -43,6 +56,13 @@ class HomeScene(Scene):
         self._nav_hover: int | None = None
         self._panel_hover: int | None = None
         self._nav_glow = [0.0] * len(NAV_ITEMS)
+        self._hub_art = _load_art("hub.jpg")
+        self._login_art = _load_art("background.jpg")
+        self.app.background.set_image(self._hub_art)
+        self._loading = False          # full-screen connect/matchmaking overlay
+        self._loading_msg = ""
+        self._pending_mode: str | None = None   # queue once the socket is up
+        self._pending_timer = 0.0
         self.app.bus.subscribe(Events.NET_MESSAGE, self._on_net_message)
         self._build()
 
@@ -118,6 +138,11 @@ class HomeScene(Scene):
                                      anchor="midleft")
         self.widgets = [self.btn_gear, self.btn_prev, self.btn_next,
                         self.btn_play, self.lnk_logout]
+        self.btn_cancel_load = Button(
+            pygame.Rect(w // 2 - int(90 * s), int(h * 0.78), int(180 * s),
+                        int(48 * s)),
+            "Cancel", self._cancel_loading, primary=False, sound_cb=ui,
+            font_size=17)
 
         # quest medallions (placeholder progression row)
         self.medallions = []
@@ -145,31 +170,56 @@ class HomeScene(Scene):
             MatchScene(self.app),
             controller=LocalController(local_name=self._local_name()))
 
+    # ------------------------------------------------------------ loading
+    def _net_state(self) -> str:
+        return getattr(getattr(self.app.backend.net, "state", None), "name",
+                       "DISCONNECTED")
+
+    def _begin_loading(self, message: str) -> None:
+        self._loading = True
+        self._loading_msg = message
+        self.app.background.set_image(self._login_art)
+
+    def _end_loading(self) -> None:
+        self._loading = False
+        self._pending_mode = None
+        self._pending_timer = 0.0
+        self.app.background.set_image(self._hub_art)
+
+    def _cancel_loading(self) -> None:
+        if self._awaiting_match and self._net_connected():
+            self.app.backend.net.send(MsgType.QUEUE_LEAVE, {})
+        self._awaiting_match = False
+        self._end_loading()
+        self._show_toast("Cancelled.")
+
+    def _begin_online(self, mode: str) -> None:
+        """Queue for a match; if the socket is still connecting, wait for it
+        on the loading screen and queue the moment it's up."""
+        state = self._net_state()
+        if state == "CONNECTED":
+            self._awaiting_match = True
+            self.app.backend.net.send(MsgType.QUEUE_JOIN, {"mode": mode})
+            self._begin_loading("Searching for an opponent"
+                                if mode == "pvp" else
+                                "Summoning the Umbral Adept")
+        elif state in ("CONNECTING", "RECONNECTING"):
+            self._pending_mode = mode
+            self._pending_timer = 0.0
+            self._begin_loading("Connecting to the aether")
+        else:
+            self._show_toast("Server offline — try Practice instead.")
+
     # ------------------------------------------------------------ actions
     def _play(self) -> None:
-        if not self._net_connected():
+        if self._net_state() == "DISCONNECTED":
             self._show_toast("Offline — starting a practice match.")
             self._start_local_match()
             return
-        if self._awaiting_match:
-            self._awaiting_match = False
-            self.app.backend.net.send(MsgType.QUEUE_LEAVE, {})
-            self._show_toast("Left the queue.")
-            return
-        self._awaiting_match = True
-        self._show_toast("Searching for an opponent...")
-        self.app.backend.net.send(MsgType.QUEUE_JOIN, {"mode": "pvp"})
+        self._begin_online("pvp")
 
     def _play_ai_online(self) -> None:
-        if not self._net_connected():
-            self._show_toast("Server offline — try Practice instead.")
-            return
-        if self._awaiting_match:
-            self._show_toast("Cancel your search first.")
-            return
-        self._awaiting_match = True
-        self._show_toast("Summoning the Umbral Adept...")
-        self.app.backend.net.send(MsgType.QUEUE_JOIN, {"mode": "ai"})
+        self._begin_online("ai")
 
     def _practice(self) -> None:
         self._start_local_match()
@@ -206,11 +256,11 @@ class HomeScene(Scene):
             return
         if envelope.type == MsgType.MATCH_FOUND.value:
             opponent = envelope.payload.get("opponent", "an opponent")
-            self._show_toast(f"Match found — {opponent}!")
+            self._loading_msg = f"Match found — {opponent}!  Preparing the table"
             return
         if envelope.type == MsgType.QUEUE_JOIN.value:
             if envelope.payload.get("status") == "waiting":
-                self._show_toast("In queue — waiting for a challenger...")
+                self._loading_msg = "Searching for an opponent"
             return
         if envelope.type == MsgType.EVENT_GAME_STATE.value:
             self._awaiting_match = False
@@ -222,11 +272,18 @@ class HomeScene(Scene):
             self.app.scenes.switch(MatchScene(self.app), controller=controller)
         elif envelope.type == MsgType.ERROR.value:
             self._awaiting_match = False
+            self._end_loading()
             self._show_toast(envelope.payload.get("message",
                                                   "Matchmaking failed."))
 
     # ------------------------------------------------------------ frame
     def handle_event(self, event: pygame.event.Event) -> None:
+        if self._loading:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self._cancel_loading()
+            else:
+                self.btn_cancel_load.handle_event(event)
+            return
         for widget in self.widgets:
             if widget.handle_event(event):
                 return
@@ -258,11 +315,67 @@ class HomeScene(Scene):
         dots = "." * (1 + int(self._time * 2) % 3)
         self.btn_play.label = (f"Searching{dots}"
                                if self._awaiting_match else "Play")
+        if self._loading:
+            self.btn_cancel_load.update(dt)
+            if self._pending_mode is not None:
+                self._pending_timer += dt
+                state = self._net_state()
+                if state == "CONNECTED":
+                    mode = self._pending_mode
+                    self._pending_mode = None
+                    self._awaiting_match = True
+                    self.app.backend.net.send(MsgType.QUEUE_JOIN,
+                                              {"mode": mode})
+                    self._loading_msg = ("Searching for an opponent"
+                                         if mode == "pvp" else
+                                         "Summoning the Umbral Adept")
+                elif self._pending_timer > 25.0 or state == "DISCONNECTED":
+                    self._cancel_loading()
+                    self._show_toast("Couldn't reach the server — it may be "
+                                     "waking up. Try again in a moment.")
         for widget in self.widgets:
             widget.update(dt)
         apply_cursor(self.widgets,
                      force_hand=(self._nav_hover is not None
                                  or self._panel_hover is not None))
+
+    # ------------------------------------------------------ loading overlay
+    def _draw_loading(self, surface: pygame.Surface) -> None:
+        w, h = surface.get_size()
+        s = self.s
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((*theme.NAVY_ABYSS, 150))
+        surface.blit(veil, (0, 0))
+
+        # golden spinning wheel: counter-rotating arcs + orbiting motes
+        cx, cy = w // 2, int(h * 0.44)
+        radius = int(58 * s)
+        box = pygame.Rect(cx - radius, cy - radius, radius * 2, radius * 2)
+        for i in range(3):
+            start = self._time * (2.2 if i % 2 == 0 else -1.7) + i * 2.1
+            span = 2.0 - i * 0.35
+            arc_box = box.inflate(int(-16 * s) * i, int(-16 * s) * i)
+            pygame.draw.arc(surface, theme.GOLD if i != 1 else theme.GOLD_DIM,
+                            arc_box, start, start + span, max(2, int(4 * s) - i))
+        for k in range(8):
+            angle = -self._time * 2.6 + k * math.tau / 8
+            mote_r = radius + int(14 * s)
+            pos = (int(cx + mote_r * math.cos(angle)),
+                   int(cy + mote_r * math.sin(angle)))
+            size = int(3 * s) + (1 if k % 2 == 0 else 0)
+            pygame.draw.circle(surface, theme.GOLD_BRIGHT, pos, size)
+        pygame.draw.circle(surface, theme.GOLD, (cx, cy), int(6 * s))
+
+        dots = "." * (1 + int(self._time * 2.5) % 3)
+        theme.draw_text(surface, f"{self._loading_msg}{dots}",
+                        (cx, cy + radius + int(52 * s)),
+                        theme.display_font(int(22 * s)), theme.GOLD_BRIGHT,
+                        anchor="center")
+        theme.draw_text(surface, "The aether bends slowly. Esc to cancel.",
+                        (cx, cy + radius + int(86 * s)),
+                        theme.body_font(int(13 * s)), theme.TEXT_DIM,
+                        anchor="center")
+        self.btn_cancel_load.draw(surface)
 
     # ------------------------------------------------------------ drawing
     def draw(self, surface: pygame.Surface) -> None:
@@ -408,6 +521,9 @@ class HomeScene(Scene):
 
         for widget in self.widgets:
             widget.draw(surface)
+
+        if self._loading:
+            self._draw_loading(surface)
 
         if self._toast_timer > 0 and self.toast:
             fade = min(1.0, self._toast_timer / 0.4)
