@@ -1,0 +1,6 @@
+# Core
+pygame-ce>=2.4        # rendering, input, audio (community edition of pygame)
+
+# Enabled when the backend goes live (see arcanum/services/):
+# supabase>=2.0       # auth + database (arcanum/services/auth.py, backend.py)
+# websockets>=12.0    # game server transport (arcanum/services/net/client.py)
