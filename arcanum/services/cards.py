@@ -103,3 +103,15 @@ def refresh(done: Optional[Callable[[int, str], None]] = None) -> None:
             done(len(specs), "")
 
     threading.Thread(target=work, daemon=True).start()
+
+
+def get_spec(card_id: str) -> Optional[CardSpec]:
+    for spec in official_cards():
+        if spec.id == card_id:
+            return spec
+    return None
+
+
+def image_name(card_id: str) -> str:
+    spec = get_spec(card_id)
+    return spec.image if spec else ""

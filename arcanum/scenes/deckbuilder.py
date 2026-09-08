@@ -22,6 +22,8 @@ from arcanum.game import catalog as cat
 from arcanum.game.catalog import (DECK_SIZE, CardDef, Rarity, max_copies,
                                   validate_deck)
 from arcanum.game.match import Kind
+from arcanum.services import cardimages
+from arcanum.services import cards as card_library
 from arcanum.services.decks import DeckRecord, DeckResult
 from arcanum.ui import theme
 from arcanum.ui.widgets import Button, Dropdown, TextInput, apply_cursor
@@ -67,6 +69,8 @@ class DeckBuilderScene(Scene):
         self._toast_timer = 0.0
         self._time = 0.0
         self._hover_card: Optional[CardDef] = None
+        self._pinned: Optional[CardDef] = None
+        self._img_cache: dict[tuple[str, int], object] = {}
         self._build()
         self._refresh_decks()
 
@@ -223,6 +227,27 @@ class DeckBuilderScene(Scene):
         else:
             self.deck.cards[card_id] = have - 1
 
+    def _card_image(self, card: CardDef, height: int):
+        """Published card image scaled to `height`, or None (vector fallback).
+        Downloads happen in the background; this polls until cached."""
+        name = card_library.image_name(card.card_id)
+        if not name:
+            return None
+        key = (name, height)
+        if key in self._img_cache:
+            return self._img_cache[key]
+        path = cardimages.get_path(name)
+        if path is None:
+            return None
+        try:
+            raw = pygame.image.load(str(path)).convert_alpha()
+            width = int(raw.get_width() * height / raw.get_height())
+            surface = pygame.transform.smoothscale(raw, (width, height))
+        except pygame.error:
+            surface = None
+        self._img_cache[key] = surface
+        return surface
+
     def _show_toast(self, message: str) -> None:
         self._toast = message
         self._toast_timer = 2.8
@@ -271,19 +296,24 @@ class DeckBuilderScene(Scene):
             self.scroll = max(0.0, min(self._max_scroll(),
                                        self.scroll - event.y * 60))
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button in (1, 3):
+            if self._pinned is not None:          # any click dismisses inspect
+                self._pinned = None
+                return
             if self.grid_rect.collidepoint(event.pos):
                 for card, rect in self._grid_cells():
                     if rect.collidepoint(event.pos):
                         if event.button == 1:
                             self._add_card(card)
-                        else:
-                            self._remove_card(card.card_id)
+                        else:                     # right-click: inspect
+                            self._pinned = card
                         return
-            if event.button == 1:
-                for card_id, rect in self._deck_rows():
-                    if rect.collidepoint(event.pos):
+            for card_id, rect in self._deck_rows():
+                if rect.collidepoint(event.pos):
+                    if event.button == 1:
                         self._remove_card(card_id)
-                        return
+                    else:
+                        self._pinned = cat.by_id(card_id)
+                    return
 
     def update(self, dt: float) -> None:
         self._time += dt
@@ -335,7 +365,10 @@ class DeckBuilderScene(Scene):
         self._draw_side_panel(surface)
         for dd in (self.dd_kind, self.dd_cost, self.dd_saved):
             dd.draw_overlay(surface)
-        self._draw_preview(surface)
+        if self._pinned is not None:
+            self._draw_inspect(surface, self._pinned)
+        elif self._hover_card is not None:
+            self._draw_preview(surface)
         self._draw_toast(surface)
 
     def _draw_card_cell(self, surface, card: CardDef, rect: pygame.Rect) -> None:
@@ -451,18 +484,55 @@ class DeckBuilderScene(Scene):
                             theme.body_font(int(12 * s)), theme.TEXT_FAINT,
                             anchor="center")
 
+    def _draw_inspect(self, surface, card: CardDef) -> None:
+        """Right-click inspect: large centered card; click anywhere to close."""
+        w, h = surface.get_size()
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((*theme.NAVY_ABYSS, 170))
+        surface.blit(veil, (0, 0))
+        height = int(h * 0.82)
+        image = self._card_image(card, height)
+        if image is not None:
+            rect = image.get_rect(center=(w // 2, h // 2))
+            theme.draw_glow_rect(surface, rect, theme.GOLD, 0.45, radius=16,
+                                 spread=16)
+            surface.blit(image, rect)
+        else:
+            panel = pygame.Rect(0, 0, int(min(420, w * 0.4)),
+                                int(min(560, h * 0.8)))
+            panel.center = (w // 2, h // 2)
+            self._draw_vector_card(surface, card, panel)
+        theme.draw_text(surface, "Click anywhere to close",
+                        (w // 2, h - 26), theme.body_font(13),
+                        theme.TEXT_FAINT, anchor="center")
+
     def _draw_preview(self, surface) -> None:
         card = self._hover_card
         if card is None:
             return
         s = self.s
+        image = self._card_image(card, int(360 * s))
+        if image is not None:
+            mx, my = pygame.mouse.get_pos()
+            x = mx + 24
+            if x + image.get_width() > surface.get_width() - 10:
+                x = mx - image.get_width() - 24
+            y = max(10, min(my - image.get_height() // 2,
+                            surface.get_height() - image.get_height() - 10))
+            surface.blit(image, (x, y))
+            return
         pw, ph = int(240 * s), int(300 * s)
         mx, my = pygame.mouse.get_pos()
         x = mx + 24
         if x + pw > surface.get_width() - 10:
             x = mx - pw - 24
         y = max(10, min(my - ph // 2, surface.get_height() - ph - 10))
-        rect = pygame.Rect(x, y, pw, ph)
+        self._draw_vector_card(surface, card, pygame.Rect(x, y, pw, ph))
+
+    def _draw_vector_card(self, surface, card: CardDef,
+                          rect: pygame.Rect) -> None:
+        s = self.s
+        pw, ph = rect.size
         theme.draw_glow_rect(surface, rect, theme.GOLD, 0.35, radius=12,
                              spread=8)
         theme.draw_panel(surface, rect, fill=theme.NAVY,
