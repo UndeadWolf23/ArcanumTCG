@@ -38,9 +38,13 @@ from arcanum.game.cardspec import (CardSpec, KeywordRef, make_card_id)  # noqa: 
 from arcanum.game.keywords import (HERO_TYPES, KEYWORDS_BY_ID, CardType,  # noqa: E402
                                    Rarity, keywords_for)
 try:
-    from card_render import ART_WINDOW, TEMPLATE_SIZE, HeroCardRenderer  # noqa: E402
+    from card_render import (ART_CORE, DEFAULT_FONT_SIZES,  # noqa: E402
+                             TEMPLATE_SIZE, renderer_for)
+    RENDER_OK = True
 except Exception:  # noqa: BLE001 - designer still runs without pillow
-    HeroCardRenderer = None
+    RENDER_OK = False
+    DEFAULT_FONT_SIZES = {"name": 48, "type": 32, "cost": 92, "rules": 34,
+                          "flavor": 28, "stats": 66}
 
 ART_BOX = (512, 384)          # card frame art window (4:3)
 LOCAL_FILE = PROJECT_DIR / "data" / "designed_cards.json"
@@ -191,14 +195,7 @@ def run() -> None:
     state = {"art_source": None,      # chosen file path
              "art_img": None,         # PIL image (original)
              "offset": [0.0, 0.0],    # template-space pan
-             "zoom": 1.0,
-             "renderer": None,
-             "render_out": None}      # last published render path
-    if HeroCardRenderer is not None:
-        try:
-            state["renderer"] = HeroCardRenderer()
-        except Exception as exc:      # noqa: BLE001
-            print("Template unavailable:", exc)
+             "zoom": 1.0}
 
     # ---------------- left: the form ----------------
     form = tk.Frame(root, bg=NAVY)
@@ -341,6 +338,29 @@ def run() -> None:
             state["art_img"] = None
         update_preview()
 
+    label("Font sizes", 15)
+    fs_frame = tk.Frame(form, bg=NAVY)
+    fs_frame.grid(row=15, column=1, columnspan=2, sticky="w", padx=6,
+                  pady=(8, 0))
+    font_entries = {}
+    for key in ("name", "type", "cost", "rules", "flavor", "stats"):
+        tk.Label(fs_frame, text=key, bg=NAVY, fg=TEXT,
+                 font=("Georgia", 8)).pack(side="left", padx=(6, 1))
+        e = tk.Entry(fs_frame, width=4, bg=NAVY2, fg=TEXT,
+                     insertbackground=TEXT, relief="flat")
+        e.insert(0, str(DEFAULT_FONT_SIZES[key]))
+        e.pack(side="left")
+        font_entries[key] = e
+
+    def font_sizes() -> dict:
+        sizes = {}
+        for key, widget in font_entries.items():
+            try:
+                sizes[key] = max(8, min(160, int(widget.get())))
+            except ValueError:
+                pass
+        return sizes
+
     def choose_art():
         path = filedialog.askopenfilename(
             title="Choose card art",
@@ -369,14 +389,14 @@ def run() -> None:
     drag = {"active": False, "last": (0, 0)}
 
     def preview_scale() -> float:
-        return PREVIEW_H / TEMPLATE_SIZE[1] if HeroCardRenderer else 1.0
+        return PREVIEW_H / TEMPLATE_SIZE[1] if RENDER_OK else 1.0
 
     def in_art_window(px, py) -> bool:
-        if state["renderer"] is None:
+        if not RENDER_OK:
             return False
         s = preview_scale()
         ox = (PREVIEW_W - TEMPLATE_SIZE[0] * s) / 2
-        l, t, r, b = ART_WINDOW
+        l, t, r, b = ART_CORE
         return (ox + l * s <= px <= ox + r * s) and (t * s <= py <= b * s)
 
     def on_press(ev):
@@ -451,18 +471,18 @@ def run() -> None:
             collectible=collectible_var.get())
 
     RARITY_HEX = {"common": "#9aa3b2", "uncommon": "#4caf7d",
-                  "rare": "#569cff", "mythic": GOLD}
+                  "rare": "#569cff", "epic": "#b06aff", "legendary": GOLD}
 
     def update_preview(*_a):
         spec = build_spec()
         preview.delete("all")
-        if state["renderer"] is not None \
-                and spec.card_type is CardType.HERO:
+        if RENDER_OK:
             try:
                 from PIL import Image, ImageTk
-                card = state["renderer"].render(
+                card = renderer_for(spec).render(
                     spec, state["art_img"],
-                    offset=tuple(state["offset"]), zoom=state["zoom"])
+                    offset=tuple(state["offset"]), zoom=state["zoom"],
+                    font_sizes=font_sizes())
                 s = preview_scale()
                 card = card.resize((round(card.width * s),
                                     round(card.height * s)), Image.LANCZOS)
@@ -484,7 +504,7 @@ def run() -> None:
         _vector_preview(spec)
 
     RARITY_HEX = {"common": "#9aa3b2", "uncommon": "#4caf7d",
-                  "rare": "#569cff", "mythic": GOLD}
+                  "rare": "#569cff", "epic": "#b06aff", "legendary": GOLD}
 
     def _vector_preview(spec):
         edge = RARITY_HEX[spec.rarity.value]
@@ -517,7 +537,7 @@ def run() -> None:
                                 fill=GOLD, font=("Georgia", 14, "bold"))
 
     for widget in (name_entry, id_entry, flavor_entry, set_entry,
-                   *stat_entries.values()):
+                   *stat_entries.values(), *font_entries.values()):
         widget.bind("<KeyRelease>", update_preview)
     rules_box.bind("<KeyRelease>", update_preview)
     for var in ht_vars:
@@ -536,19 +556,14 @@ def run() -> None:
         return spec
 
     def rendered_card(spec) -> Path | None:
-        """Final product: full composited card PNG (template + art + text)."""
-        if state["renderer"] is None or spec.card_type is not CardType.HERO:
-            # non-hero templates pending: upload fitted art only (if any)
-            if state["art_img"] is None:
-                return None
-            fitted = work_dir() / "_designer_art.png"
-            fitted.parent.mkdir(parents=True, exist_ok=True)
-            state["art_img"].save(fitted, "PNG")
-            return fitted
+        """Final product: full composited card PNG (frame + art + text)."""
+        if not RENDER_OK:
+            return None
         out = work_dir() / f"_publish_{spec.id}.png"
-        state["renderer"].render_png(spec, state["art_img"],
-                                     offset=tuple(state["offset"]),
-                                     zoom=state["zoom"], out_path=out)
+        renderer_for(spec).render_png(spec, state["art_img"],
+                                      offset=tuple(state["offset"]),
+                                      zoom=state["zoom"],
+                                      font_sizes=font_sizes(), out_path=out)
         return out
 
     def do_publish():
@@ -566,6 +581,38 @@ def run() -> None:
         status.config(text=save_local(spec, rendered_card(spec)),
                       fg="#7dd487")
 
+    def do_new_card():
+        """Reset the form to a blank card. The service key field is left
+        alone on purpose — it's the designer's own secret, not part of the
+        card being designed, and re-pasting it for every card would be
+        tedious (and easy to fat-finger wrong)."""
+        name_entry.delete(0, "end")
+        id_entry.delete(0, "end")
+        type_var.set("hero")
+        rarity_var.set("common")
+        for e in stat_entries.values():
+            e.delete(0, "end")
+            e.insert(0, "0")
+        for var in ht_vars:
+            var.set("")
+        chosen_keywords.clear()
+        kw_list.delete(0, "end")
+        refresh_kw_options()
+        rules_box.delete("1.0", "end")
+        flavor_entry.delete(0, "end")
+        set_entry.delete(0, "end")
+        set_entry.insert(0, "BASE")
+        collectible_var.set(True)
+        for key, e in font_entries.items():
+            e.delete(0, "end")
+            e.insert(0, str(DEFAULT_FONT_SIZES[key]))
+        state["art_source"] = None
+        state["art_img"] = None
+        state["offset"] = [0.0, 0.0]
+        state["zoom"] = 1.0
+        status.config(text="New card — form cleared.", fg=TEXT)
+        update_preview()
+
     buttons = tk.Frame(form, bg=NAVY)
     buttons.grid(row=13, column=0, columnspan=3, pady=(14, 0), sticky="w")
     tk.Button(buttons, text="Publish to Database", command=do_publish,
@@ -574,6 +621,8 @@ def run() -> None:
     tk.Button(buttons, text="Save Local", command=do_save_local, bg=NAVY2,
               fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left",
                                                             padx=10)
+    tk.Button(buttons, text="New Card", command=do_new_card, bg=NAVY2,
+              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left")
 
     if dnd_available:
         register_dnd()

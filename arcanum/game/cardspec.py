@@ -82,7 +82,7 @@ class CardSpec:
         return cls(
             id=str(data["id"]), name=str(data["name"]),
             card_type=CardType(data["card_type"]),
-            rarity=Rarity(data.get("rarity", "common")),
+            rarity=Rarity.parse(data.get("rarity", "common")),
             cost=int(data.get("cost", 0)), attack=int(data.get("attack", 0)),
             health=int(data.get("health", 0)),
             durability=int(data.get("durability", 0)),
@@ -109,10 +109,18 @@ class CardSpec:
             return False, f"Cost must be 0-{COST_LIMIT}."
 
         ct = self.card_type
-        if ct in (CardType.HERO, CardType.MINION):
+        if ct is CardType.HERO:
+            # Heroes may be built with any power/toughness, including 0/0.
+            # A hero with 0 health simply dies to state-based actions as
+            # soon as it enters the battlefield, unless an enter-the-
+            # battlefield effect (e.g. Charged) pumps its toughness first.
+            if not (0 <= self.attack <= STAT_LIMIT
+                    and 0 <= self.health <= STAT_LIMIT):
+                return False, "Heroes need attack 0+ and health 0+."
+        if ct is CardType.MINION:
             if not (0 <= self.attack <= STAT_LIMIT
                     and 1 <= self.health <= STAT_LIMIT):
-                return False, "Heroes/minions need attack 0+ and health 1+."
+                return False, "Minions need attack 0+ and health 1+."
         if ct is CardType.CHAMPION:
             if not (10 <= self.health <= STAT_LIMIT):
                 return False, "Champions need starting life of at least 10."

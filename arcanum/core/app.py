@@ -185,8 +185,15 @@ class App:
     # ------------------------------------------------------------ session/net
     def _on_login(self, user, **_kw) -> None:
         from arcanum.services import cards as card_library
+        # Load whatever's on disk first (instant, works offline), then
+        # block (bounded) on a real download so the library is actually in
+        # sync with the database before home/deckbuilder render — otherwise
+        # goto_home() below fires before the old fire-and-forget refresh()
+        # thread finished, and players briefly (or, on a slow/failed
+        # network check, indefinitely) see cards already removed from the
+        # database because they were never dropped from the local cache.
         card_library.load_cache()
-        card_library.refresh()
+        card_library.refresh_sync()
         self.backend.refresh_deck_store()
         token = self.backend.session.saved_token() or "dev"
         try:

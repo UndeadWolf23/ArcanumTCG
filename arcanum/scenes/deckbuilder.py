@@ -32,8 +32,11 @@ log = logging.getLogger(__name__)
 
 MANA_FILL = (86, 156, 255)
 MANA_CORE = (170, 210, 255)
-RARITY_COLORS = {Rarity.COMMON: theme.TEXT_DIM, Rarity.UNCOMMON: theme.SUCCESS,
-                 Rarity.RARE: MANA_FILL, Rarity.MYTHIC: theme.GOLD_BRIGHT}
+RARITY_COLORS = {Rarity.COMMON: theme.TEXT_DIM,
+                 Rarity.UNCOMMON: theme.SUCCESS,
+                 Rarity.RARE: MANA_FILL,
+                 Rarity.EPIC: (176, 106, 255),
+                 Rarity.LEGENDARY: theme.GOLD_BRIGHT}
 
 KIND_FILTERS = [("All types", None), ("Creatures", Kind.CREATURE),
                 ("Spells", Kind.SPELL), ("Relics", Kind.RELIC)]

@@ -27,7 +27,15 @@ class Rarity(str, Enum):
     COMMON = "common"
     UNCOMMON = "uncommon"
     RARE = "rare"
-    MYTHIC = "mythic"
+    EPIC = "epic"
+    LEGENDARY = "legendary"
+
+    @classmethod
+    def parse(cls, value: str) -> "Rarity":
+        value = str(value).lower()
+        if value == "mythic":          # legacy cards published pre-rework
+            return cls.LEGENDARY
+        return cls(value)
 
 
 @dataclass(frozen=True)
@@ -89,6 +97,13 @@ KEYWORDS: tuple[KeywordDef, ...] = (
     _hero("undying", "Undying",
           "The first time this hero dies, return it to play with 1 health.",
           implemented=True),
+    _hero("intelligent", "Intelligent",
+          "When this hero deals damage to an opponent's champion, draw 1 "
+          "card.", implemented=True),
+    _hero("charged", "Charged {x}",
+          "When this hero enters the battlefield, place a +{x}/+{x} "
+          "charge on it.", has_value=True, charge="growth",
+          implemented=True),
 
     # ------------------------------------------- hero: registered (engine v2)
     _hero("harvest", "Harvest",
@@ -135,6 +150,9 @@ KEYWORDS: tuple[KeywordDef, ...] = (
           "Whenever this hero gains any charge, another target hero you "
           "control gains a charge of a kind it already has."),
     _hero("banner", "Banner", "Minions you control have +1/+0."),
+    _hero("pack", "Pack {x}",
+          "All other heroes you control that share a type with this hero "
+          "get +{x}/+{x}.", has_value=True),
     _hero("consume", "Consume",
           "Destroy a friendly minion: this hero gains +2/+2 until end of "
           "turn."),

@@ -7,16 +7,9 @@ matches will instantiate from it once decks are wired into play.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 
+from arcanum.game.keywords import Rarity
 from arcanum.game.match import Effect, Kind
-
-
-class Rarity(str, Enum):
-    COMMON = "common"
-    UNCOMMON = "uncommon"
-    RARE = "rare"
-    MYTHIC = "mythic"
 
 
 @dataclass(frozen=True)
@@ -72,9 +65,9 @@ CATALOG: tuple[CardDef, ...] = (
               text="Its wake paints the night."),
     _creature("c_colossus", "Eclipse Colossus", 6, 6, 6, Rarity.RARE,
               text="Where it stands, noon becomes midnight."),
-    _creature("c_seraph", "Zenith Seraph", 7, 7, 7, Rarity.MYTHIC,
+    _creature("c_seraph", "Zenith Seraph", 7, 7, 7, Rarity.LEGENDARY,
               text="The high point of every sky."),
-    _creature("c_devourer", "Night Devourer", 7, 8, 5, Rarity.MYTHIC,
+    _creature("c_devourer", "Night Devourer", 7, 8, 5, Rarity.LEGENDARY,
               text="It swallowed a constellation whole."),
 
     # -- spells --------------------------------------------------------------
@@ -94,8 +87,8 @@ BY_ID: dict[str, CardDef] = {c.card_id: c for c in CATALOG}
 # deck construction rules
 DECK_SIZE = 30
 MAX_COPIES = 3
-COPIES_BY_RARITY = {Rarity.COMMON: 3, Rarity.UNCOMMON: 3,
-                    Rarity.RARE: 2, Rarity.MYTHIC: 1}
+COPIES_BY_RARITY = {Rarity.COMMON: 3, Rarity.UNCOMMON: 3, Rarity.RARE: 2,
+                    Rarity.EPIC: 2, Rarity.LEGENDARY: 1}
 
 
 def starter_collection() -> dict[str, int]:
@@ -145,7 +138,7 @@ def _spec_to_def(spec) -> CardDef | None:
         return None
     return CardDef(
         card_id=spec.id, name=spec.name, kind=kind, cost=spec.cost,
-        rarity=Rarity(spec.rarity.value), attack=spec.attack,
+        rarity=Rarity.parse(spec.rarity.value), attack=spec.attack,
         health=spec.health, text=spec.composed_text(),
         haste=spec.has_keyword("rush"),
     )

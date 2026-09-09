@@ -296,6 +296,11 @@ class MatchState:
         if card.kind is Kind.CREATURE:
             card.sick = not (card.haste or card.has_kw("rush"))
             player.board.append(card)
+            # Enter-the-battlefield effects (e.g. Charged) resolve before
+            # state-based actions check for lethal (<=0) toughness — a
+            # 0/0 creature only survives if something pumps it first.
+            self._enter_battlefield(index, card, events)
+            self._resolve_state_based_death(index, card, events)
         elif card.kind is Kind.RELIC:
             player.relics.append(card)
             if card.effect is Effect.MANA_CRYSTAL:
@@ -318,6 +323,43 @@ class MatchState:
         log.info("%s plays %s (cost %d, %d mana left).",
                  player.name, card.name, card.cost, player.mana)
         return True, "", events
+
+    # ------------------------------------------------------- entering play
+    def _enter_battlefield(self, index: int, card: CardInstance,
+                            events: list[Event]) -> None:
+        """Trigger a creature's own enter-the-battlefield keywords.
+
+        Called once, right after the card is placed on the board and
+        before any state-based death check, so a permanent stat boost
+        here (Charged) can save a creature that would otherwise die for
+        having 0 toughness.
+        """
+        if card.has_kw("charged"):
+            bump = card.kw_value("charged", 1)
+            card.attack += bump
+            card.health += bump
+            card.max_health += bump
+            events.append({"type": "keyword", "keyword": "charged",
+                           "player": index, "uid": card.uid,
+                           "attack": card.attack, "health": card.health})
+
+    def _resolve_state_based_death(self, index: int, card: CardInstance,
+                                    events: list[Event]) -> bool:
+        """Check one permanent for lethal (<=0) toughness and, if so, kill
+        it — honoring Undying. Returns True if the card actually died
+        (Undying saves it, so that case returns False)."""
+        side = self.players[index]
+        if card not in side.board or card.health > 0:
+            return False
+        if card.has_kw("undying") and not card.undying_spent:
+            card.undying_spent = True
+            card.health = 1
+            events.append({"type": "keyword", "keyword": "undying",
+                           "player": index, "uid": card.uid, "health": 1})
+            return False
+        side.board.remove(card)
+        events.append({"type": "death", "player": index, "uid": card.uid})
+        return True
 
     # ------------------------------------------------------------ combat
     def can_attack(self, index: int, attacker_uid: int) -> tuple[bool, str]:
@@ -387,6 +429,10 @@ class MatchState:
                 events.append({"type": "heal", "player": source_owner,
                                "uid": champ.uid, "amount": amount,
                                "health": champ.health})
+            # Intelligent: damaging the opposing champion draws a card
+            if (victim.kind is Kind.CHAMPION and victim is not champ
+                    and source.has_kw("intelligent")):
+                events.append(self._draw_one(source_owner))
             if victim.kind is Kind.CREATURE:
                 # Lethal: any damage to a hero destroys it
                 if source.has_kw("lethal") and source.kind is Kind.CREATURE:
@@ -440,31 +486,22 @@ class MatchState:
         else:
             hit(attacker, target, attacker.attack, combat=True)
 
-        # deaths — with Undying and Feast woven in
+        # deaths — state-based, with Undying and Feast woven in
         def resolve_death(card) -> None:
             owner = owner_of(card)
-            side = self.players[owner]
-            if card in side.board and card.health <= 0:
-                if card.has_kw("undying") and not card.undying_spent:
-                    card.undying_spent = True
-                    card.health = 1
-                    events.append({"type": "keyword", "keyword": "undying",
-                                   "player": owner, "uid": card.uid,
-                                   "health": 1})
-                    return
-                side.board.remove(card)
-                events.append({"type": "death", "player": owner,
-                               "uid": card.uid})
-                killer = attacker if card is target else target
-                if (killer.kind is Kind.CREATURE and killer.has_kw("feast")
-                        and killer.health > 0):
-                    killer_owner = owner_of(killer)
-                    who = self.players[killer_owner]
-                    if who.mana < MAX_MANA:
-                        who.mana += 1
-                    events.append({"type": "keyword", "keyword": "feast",
-                                   "player": killer_owner, "uid": killer.uid,
-                                   "mana": who.mana})
+            died = self._resolve_state_based_death(owner, card, events)
+            if not died:
+                return
+            killer = attacker if card is target else target
+            if (killer.kind is Kind.CREATURE and killer.has_kw("feast")
+                    and killer.health > 0):
+                killer_owner = owner_of(killer)
+                who = self.players[killer_owner]
+                if who.mana < MAX_MANA:
+                    who.mana += 1
+                events.append({"type": "keyword", "keyword": "feast",
+                               "player": killer_owner, "uid": killer.uid,
+                               "mana": who.mana})
 
         if target.kind is Kind.CREATURE:
             resolve_death(target)

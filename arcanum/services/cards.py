@@ -105,6 +105,34 @@ def refresh(done: Optional[Callable[[int, str], None]] = None) -> None:
     threading.Thread(target=work, daemon=True).start()
 
 
+def refresh_sync(timeout: float = 8.0) -> tuple[int, str]:
+    """Blocking variant of `refresh()`.
+
+    `refresh()` kicks off the download on a background thread and returns
+    immediately, which is right for a "check for updates while you play"
+    call but wrong for login: callers used to fire `refresh()` and then
+    immediately switch scenes, so the UI was built from whatever
+    `load_cache()` had already loaded from disk — including cards that had
+    since been unpublished or deleted server-side. This waits (bounded by
+    `timeout`) for that same download to actually land before returning, so
+    the local library is confirmed in sync with the database before the
+    caller proceeds. On timeout or network failure it just falls back to
+    whatever is already cached, same as `refresh()` always has.
+    """
+    done_event = threading.Event()
+    result = {"count": len(official_cards()), "error": ""}
+
+    def _done(count: int, error: str) -> None:
+        result["count"], result["error"] = count, error
+        done_event.set()
+
+    refresh(done=_done)
+    if not done_event.wait(timeout):
+        log.warning("Card library refresh timed out after %.1fs on login; "
+                    "continuing with the cached library.", timeout)
+    return result["count"], result["error"]
+
+
 def get_spec(card_id: str) -> Optional[CardSpec]:
     for spec in official_cards():
         if spec.id == card_id:
