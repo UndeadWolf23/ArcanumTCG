@@ -33,6 +33,9 @@ Event = dict[str, Any]
 
 
 class MatchController:
+    def activate(self, uid: int, ability: str, target_uid: int = 0) -> None:
+        raise NotImplementedError
+
     """Interface. `state` is a MatchState used for reads/UI hints only."""
 
     def __init__(self) -> None:
@@ -63,12 +66,36 @@ class MatchController:
 # Local (offline practice)
 # ---------------------------------------------------------------------------
 class LocalController(MatchController):
-    def __init__(self, local_name: str = "You", seed: int | None = None) -> None:
+    def activate(self, uid: int, ability: str, target_uid: int = 0) -> None:
+        ok, why, events = self.state.activate(0, uid, ability, target_uid)
+        if not ok:
+            self._emit({"type": "rejected", "reason": why})
+            return
+        for event in self._normalize(events):
+            self._emit(event)
+
+    def __init__(self, local_name: str = "You", seed: int | None = None,
+                 deck: dict | None = None) -> None:
         super().__init__()
         self.state = MatchState(local_name=local_name, seed=seed)
+        self.deck = self._checked(deck)
         self.ai = DummyOpponent(player_index=1)
         self._timers: list[list] = []
         self._closed = False
+
+    @staticmethod
+    def _checked(deck: dict | None) -> dict:
+        """The player's chosen deck, or the Starter if it doesn't validate."""
+        from arcanum.game import catalog as cat
+        starter = cat.starter_deck_cards()
+        if not deck:
+            return starter
+        ok, why = cat.validate_deck(deck, cat.full_collection())
+        if not ok:
+            log.warning("Chosen deck invalid (%s); using the Starter Deck.",
+                        why)
+            return starter
+        return dict(deck)
 
     # -- helpers -------------------------------------------------------------
     def _schedule(self, delay: float, fn: Callable[[], None]) -> None:
@@ -82,6 +109,11 @@ class LocalController(MatchController):
                 timer[1]()
             except Exception:  # noqa: BLE001
                 log.exception("Local match flow step failed")
+
+    def _flush_turn_events(self) -> list[Event]:
+        events = list(getattr(self.state, "pending_turn_events", []))
+        self.state.pending_turn_events = []
+        return events
 
     def _phase_event(self) -> Event:
         return {"type": "phase", "phase": self.state.phase.value,
@@ -110,7 +142,8 @@ class LocalController(MatchController):
 
     # -- lifecycle -----------------------------------------------------------
     def start(self) -> None:
-        self.state.start()
+        from arcanum.game import catalog as cat
+        self.state.start(decks=[self.deck, cat.starter_deck_cards()])
         self.opp_hand_count = len(self.state.player(1).hand)
         self._emit({"type": "match_start"})
         self._emit(self._phase_event())
@@ -154,6 +187,8 @@ class LocalController(MatchController):
         if self._closed or self.state.winner is not None:
             return
         self.state.advance_phase()
+        for _ev in self._normalize(self._flush_turn_events()):
+            self._emit(_ev)
         self._emit(self._phase_event())
         self._enter_phase()
 
@@ -221,6 +256,11 @@ class LocalController(MatchController):
 # Remote (server-authoritative)
 # ---------------------------------------------------------------------------
 class RemoteController(MatchController):
+    def activate(self, uid: int, ability: str, target_uid: int = 0) -> None:
+        self.net.send(MsgType.INTENT_ACTIVATE,
+                      {"uid": uid, "ability": ability,
+                       "target": target_uid}, match_id=self.match_id)
+
     def __init__(self, bus: EventBus, net: NetworkClient, match_id: str) -> None:
         super().__init__()
         self.bus = bus

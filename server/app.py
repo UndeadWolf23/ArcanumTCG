@@ -63,6 +63,8 @@ class Connection:
             return
         if mtype == MsgType.QUEUE_JOIN.value:
             mode = str(env.payload.get("mode", "pvp")).lower()
+            deck = env.payload.get("deck")
+            self.deck = deck if isinstance(deck, dict) else None
             await LOBBY.join(self, mode)
             return
         if mtype == MsgType.QUEUE_LEAVE.value:

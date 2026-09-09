@@ -213,6 +213,7 @@ class MatchScene(Scene):
         self._drag_dx = self._drag_dy = 0.0
         self.pending_spell: Optional[CardSprite] = None    # staged, awaiting target
         self.attack_source: Optional[CardSprite] = None    # combat arrow origin
+        self.pending_ability: Optional[tuple[int, str]] = None
         self._target_uid: Optional[int] = None
         self._pinned: Optional[tuple[CardInstance, pygame.Rect]] = None
         self._guard_flash = 0.0            # opp creatures flash: champion guarded
@@ -332,11 +333,69 @@ class MatchScene(Scene):
     # ------------------------------------------------------------ controller events
     def _pump_controller(self, dt: float) -> None:
         self.controller.update(dt)
+        self._rebind_sprites()
         for event in self.controller.poll_events():
             try:
                 self._on_controller_event(event)
             except Exception:  # noqa: BLE001
                 log.exception("Failed handling controller event %r", event.get("type"))
+
+    KEYWORD_FX = {
+        "lethal": (255, 90, 90), "execute": (255, 130, 60),
+        "thorns": (120, 220, 120), "pierce": (255, 200, 90),
+        "crush": (255, 160, 60), "feast": (255, 120, 200),
+        "undying": (200, 160, 255), "surge": (120, 200, 255),
+        "rage": (255, 100, 100), "greed": (255, 215, 100),
+        "lifebound": (140, 240, 160), "channel": (120, 220, 255),
+        "discharge": (90, 200, 255), "tribute": (255, 215, 120),
+        "harvest": (170, 240, 140), "last_stand": (220, 220, 240),
+        "transform": (255, 210, 80),
+    }
+
+    def _on_keyword_event(self, event: dict) -> None:
+        keyword = str(event.get("keyword", ""))
+        color = self.KEYWORD_FX.get(keyword, theme.GOLD_BRIGHT)
+        sprite = self._sprite_for(int(event.get("player", 0)),
+                                  int(event.get("uid", -1)))
+        pos = (sprite.x, sprite.y - 44) if sprite is not None \
+            else self.stage_pos
+        label = "TRANSFORM!" if keyword == "transform" \
+            else keyword.replace("_", " ").upper()
+        self.floats.append(FloatText(label, pos, color))
+
+    def _on_charge_event(self, event: dict) -> None:
+        sprite = self._sprite_for(int(event.get("player", 0)),
+                                  int(event.get("uid", -1)))
+        if sprite is None:
+            return
+        kind = str(event.get("kind", "charge"))
+        color = (200, 160, 255) if kind == "astral" else (90, 200, 255)
+        count = event.get("count")
+        text = f"{kind} x{count}" if count else f"+1 {kind}"
+        self.floats.append(FloatText(text, (sprite.x, sprite.y - 30), color))
+
+    def _on_buff_event(self, event: dict) -> None:
+        sprite = self._sprite_for(int(event.get("player", 0)),
+                                  int(event.get("uid", -1)))
+        if sprite is None:
+            return
+        atk, hp = int(event.get("attack", 0)), int(event.get("health", 0))
+        self.floats.append(FloatText(f"+{atk}/+{hp}",
+                                     (sprite.x, sprite.y - 30),
+                                     (140, 240, 160)))
+
+    def _on_spawn_event(self, event: dict) -> None:
+        data = event.get("card")
+        if not isinstance(data, dict):
+            return
+        card = card_from_dict(data)
+        owner = int(event.get("player", 0))
+        source = self.deck_pos if owner == 0 else (80, 60)
+        sprite = CardSprite(card, source)
+        sprite.start_drop()
+        self._place_played_sprite(sprite, owner)
+        self.floats.append(FloatText("SUMMONED", (sprite.x, sprite.y - 30),
+                                     theme.GOLD_BRIGHT))
 
     def _on_controller_event(self, event: dict) -> None:
         etype = event.get("type")
@@ -361,8 +420,24 @@ class MatchScene(Scene):
             self._kill_sprite(event["player"], event["uid"])
         elif etype == "victory":
             self._finish(event["player"])
+        elif etype == "keyword":
+            self._on_keyword_event(event)
+        elif etype == "charge":
+            self._on_charge_event(event)
+        elif etype == "buff":
+            self._on_buff_event(event)
+        elif etype == "spawn":
+            self._on_spawn_event(event)
+        elif etype == "heal":
+            sprite = self._sprite_for(event.get("player", 0),
+                                      event.get("uid", -1))
+            if sprite is not None:
+                self.floats.append(FloatText(f"+{event.get('amount', 0)}",
+                                             (sprite.x, sprite.y - 30),
+                                             (120, 230, 140)))
         elif etype == "rejected":
             self._cancel_stage()
+            self.pending_ability = None
             self._show_toast(event.get("reason", "That action was refused."))
 
     def _spawn_hand_sprite(self, card):
@@ -455,6 +530,64 @@ class MatchScene(Scene):
             sprite.ty = int(h * (0.52 if owner == 0 else 0.40))
             self.effects.append(sprite)
             self._schedule(0.55, sprite.start_die)
+
+    def _ability_for(self, sprite: CardSprite) -> Optional[str]:
+        """Which activated ability this OWN card offers right now (client
+        mirror of MatchState.available_abilities; server still authoritative)."""
+        state = self.controller.state
+        if state.active != 0 or state.phase is not Phase.MAIN \
+                or self._flow_busy:
+            return None
+        card = sprite.card
+        if sprite in self.board:
+            if card.has_kw("channel") and not card.exhausted and not card.sick:
+                return "channel"
+            if card.has_kw("discharge") and \
+                    card.charges.get("lightning", 0) > 0:
+                return "discharge"
+        if sprite in self.relics and card.has_kw("tribute"):
+            return "tribute"
+        return None
+
+    def _ability_gem_rect(self, sprite: CardSprite) -> pygame.Rect:
+        size = self.board_card_size if sprite in self.board \
+            else self.relic_size
+        rect = sprite.rect(size)
+        gem = pygame.Rect(0, 0, int(26 * self.ui_scale),
+                          int(26 * self.ui_scale))
+        gem.center = (rect.right - 4, rect.top + 4)
+        return gem
+
+    def _ability_gem_hit(self, pos) -> Optional[tuple[int, str]]:
+        for sprite in (*self.board, *self.relics):
+            ability = self._ability_for(sprite)
+            if ability and self._ability_gem_rect(sprite).collidepoint(pos):
+                return sprite.card.uid, ability
+        return None
+
+    def _rebind_sprites(self) -> None:
+        """Point every sprite at the controller's live card instance so
+        authoritative field changes (sick, exhausted, stats) always render —
+        snapshots replace instances, and stale references froze the
+        summoning-sickness swirl on opponent cards."""
+        state = self.controller.state
+        live: dict[int, CardInstance] = {}
+        for player in state.players:
+            for card in player.board + player.relics + player.hand:
+                live[card.uid] = card
+            if player.champion is not None:
+                live[player.champion.uid] = player.champion
+        for group in (self.board, self.opp_board, self.relics,
+                      self.opp_relics, self.hand):
+            for sprite in group:
+                fresh = live.get(sprite.card.uid)
+                if fresh is not None and fresh is not sprite.card:
+                    sprite.card = fresh
+        for sprite in (self.champ, self.opp_champ):
+            if sprite is not None:
+                fresh = live.get(sprite.card.uid)
+                if fresh is not None and fresh is not sprite.card:
+                    sprite.card = fresh
 
     def _sprite_for(self, owner: int, uid: int) -> Optional[CardSprite]:
         pools: list[CardSprite] = list(self.board if owner == 0 else self.opp_board)
@@ -640,6 +773,9 @@ class MatchScene(Scene):
                 self.btn_leave_no.handle_event(event)
             return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            if self.pending_ability is not None:
+                self.pending_ability = None
+                return
             if self.pending_spell is not None:
                 self._cancel_stage()
                 return
@@ -668,7 +804,26 @@ class MatchScene(Scene):
                 self._cancel_stage()
             return
 
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                and self.pending_ability is not None:
+            uid, ability = self.pending_ability
+            for sprite in self.opp_board:
+                if sprite.rect(self.board_card_size).collidepoint(event.pos):
+                    self.pending_ability = None
+                    self.controller.activate(uid, ability, sprite.card.uid)
+                    return
+            self.pending_ability = None       # clicked away: cancel targeting
+            return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            gem = self._ability_gem_hit(event.pos)
+            if gem is not None:
+                uid, ability = gem
+                if ability == "discharge":
+                    self.pending_ability = (uid, ability)
+                    self._show_toast("Choose an enemy hero to strike.")
+                else:
+                    self.controller.activate(uid, ability)
+                return
             self._pinned = None
             sprite = self._hand_sprite_under(event.pos)
             if sprite is not None:
@@ -861,6 +1016,7 @@ class MatchScene(Scene):
         self._draw_arrows(surface)
         for widget in self.widgets:
             widget.draw(surface)
+        self._draw_card_overlays(surface)
         self._draw_floats(surface)
         self._draw_preview(surface)
         self._draw_toast(surface)
@@ -1075,6 +1231,65 @@ class MatchScene(Scene):
                          radius=6)
         pygame.draw.circle(surface, theme.GOLD_DIM, rect.center,
                            max(3, rect.width // 5), width=1)
+
+    CHARGE_COLORS = {"astral": (200, 160, 255), "lightning": (90, 200, 255),
+                     "blood": (230, 90, 90)}
+
+    def _draw_card_overlays(self, surface: pygame.Surface) -> None:
+        """Charge pips, keyword initials, and activation gems on board cards."""
+        s = self.ui_scale
+        for owner, group in ((0, self.board), (1, self.opp_board)):
+            size = self.board_card_size
+            for sprite in group:
+                rect = sprite.rect(size)
+                card = sprite.card
+                # charge pips (bottom-left, stacked per kind)
+                y = rect.bottom - int(10 * s)
+                for kind, count in sorted(card.charges.items()):
+                    if count <= 0:
+                        continue
+                    color = self.CHARGE_COLORS.get(kind, theme.GOLD)
+                    theme.aa_circle(surface, color,
+                                    (rect.x + int(9 * s), y), int(6 * s))
+                    theme.draw_text(surface, str(count),
+                                    (rect.x + int(20 * s), y),
+                                    theme.body_font(int(11 * s), bold=True),
+                                    color, anchor="midleft")
+                    y -= int(15 * s)
+                # keyword initials strip (top-left, up to 4)
+                initials = [k[0].upper() for k in card.keywords][:4]
+                if initials:
+                    theme.draw_text(surface, "·".join(initials),
+                                    (rect.x + int(4 * s), rect.y + int(3 * s)),
+                                    theme.body_font(int(10 * s), bold=True),
+                                    theme.GOLD_DIM, anchor="topleft")
+        # activation gems on own cards
+        for sprite in (*self.board, *self.relics):
+            ability = self._ability_for(sprite)
+            if not ability:
+                continue
+            gem = self._ability_gem_rect(sprite)
+            pulse = 0.6 + 0.4 * abs(math.sin(self._time * 3))
+            theme.draw_glow_rect(surface, gem, theme.GOLD_GLOW,
+                                 0.5 * pulse, radius=13, spread=6)
+            theme.aa_circle(surface, theme.GOLD, gem.center,
+                            gem.width // 2)
+            theme.aa_circle(surface, theme.GOLD_BRIGHT, gem.center,
+                            gem.width // 2, width=2)
+            symbol = {"channel": "+", "discharge": "⚡",
+                      "tribute": "✦"}.get(ability, "!")
+            theme.draw_text(surface, symbol, gem.center,
+                            theme.body_font(int(14 * self.ui_scale),
+                                            bold=True),
+                            theme.TEXT_ON_GOLD, anchor="center")
+        # discharge targeting arrow
+        if self.pending_ability is not None:
+            uid, _ability = self.pending_ability
+            sprite = self._sprite_for(0, uid)
+            if sprite is not None:
+                draw_arrow(surface, (sprite.x, sprite.y),
+                           pygame.mouse.get_pos(), (90, 200, 255),
+                           self._time)
 
     def _draw_floats(self, surface: pygame.Surface) -> None:
         for ft in self.floats:

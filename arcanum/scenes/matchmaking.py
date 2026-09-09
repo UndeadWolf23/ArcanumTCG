@@ -141,8 +141,11 @@ class MatchmakingScene(Scene):
         name = user.username if user else "You"
         log.info("Practice match with deck '%s'.",
                  self.chosen.name if self.chosen else "Starter")
+        deck = dict(self.chosen.cards) if self.chosen and self.chosen.cards \
+            else None
         self.app.scenes.switch(MatchScene(self.app),
-                               controller=LocalController(local_name=name))
+                               controller=LocalController(local_name=name,
+                                                          deck=deck))
 
     def _cancel(self) -> None:
         self.app.scenes.pop()

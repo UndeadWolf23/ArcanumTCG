@@ -20,6 +20,9 @@ def card_to_dict(card: CardInstance) -> dict[str, Any]:
         "sick": card.sick, "haste": card.haste, "text": card.text,
         "effect": card.effect.value, "needs_target": card.needs_target,
         "keywords": dict(card.keywords),
+        "charges": dict(card.charges),
+        "is_token": card.is_token,
+        "temp_attack": card.temp_attack,
     }
 
 
@@ -34,6 +37,9 @@ def card_from_dict(data: dict[str, Any]) -> CardInstance:
         text=str(data.get("text", "")), effect=Effect(data.get("effect", "none")),
         needs_target=bool(data.get("needs_target", False)),
         keywords=dict(data.get("keywords", {})),
+        charges=dict(data.get("charges", {})),
+        is_token=bool(data.get("is_token", False)),
+        temp_attack=int(data.get("temp_attack", 0)),
     )
 
 
@@ -43,6 +49,8 @@ def _update_card(card: CardInstance, data: dict[str, Any]) -> None:
     card.max_health = int(data.get("max_health", card.max_health))
     card.exhausted = bool(data.get("exhausted", card.exhausted))
     card.sick = bool(data.get("sick", card.sick))
+    card.charges = dict(data.get("charges", card.charges))
+    card.temp_attack = int(data.get("temp_attack", card.temp_attack))
 
 
 def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:

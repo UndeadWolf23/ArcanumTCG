@@ -33,6 +33,7 @@ class Seat:
     name: str
     send: Optional[SendFn] = None       # None => AI seat
     connected: bool = True
+    deck: Optional[dict] = None         # submitted with QUEUE_JOIN
 
     @property
     def is_ai(self) -> bool:
@@ -59,11 +60,28 @@ def redact_events(events: list[dict[str, Any]], viewer: int) -> list[dict[str, A
     return out
 
 
+def _checked_deck(deck) -> dict:
+    """A player's submitted deck, or the Starter if absent/invalid."""
+    from arcanum.game import catalog as cat
+    starter = cat.starter_deck_cards()
+    if not isinstance(deck, dict) or not deck:
+        return starter
+    try:
+        ok, why = cat.validate_deck(deck, cat.full_collection())
+    except Exception:  # noqa: BLE001
+        return starter
+    if not ok:
+        log.info("Submitted deck rejected (%s); starter assigned.", why)
+        return starter
+    return {str(k): int(v) for k, v in deck.items()}
+
+
 class MatchSession:
     def __init__(self, seats: list[Seat], seed: int | None = None) -> None:
         assert len(seats) == 2
         self.match_id = uuid.uuid4().hex[:12]
         self.seats = seats
+        self.decks = [_checked_deck(seat.deck) for seat in seats]
         self.match = MatchState(local_name=seats[0].name,
                                 opponent_name=seats[1].name, seed=seed)
         self.ai = DummyOpponent(player_index=1) if seats[1].is_ai else None
@@ -107,7 +125,7 @@ class MatchSession:
 
     async def _run(self) -> None:
         try:
-            self.match.start()
+            self.match.start(decks=self.decks)
             await self.broadcast_start()
             while not self.closed and self.match.winner is None:
                 await self._pump_phase()
@@ -119,7 +137,10 @@ class MatchSession:
 
     async def _advance(self) -> None:
         self.match.advance_phase()
-        await self.broadcast_delta([self._phase_event()])
+        events = list(getattr(self.match, "pending_turn_events", []))
+        self.match.pending_turn_events = []
+        events.append(self._phase_event())
+        await self.broadcast_delta(events)
 
     async def _pump_phase(self) -> None:
         phase = self.match.phase
@@ -134,6 +155,8 @@ class MatchSession:
                                "card": result.card, "burned": result.burned,
                                "skipped": result.skipped})
             self.match.advance_phase()
+            events.extend(getattr(self.match, "pending_turn_events", []))
+            self.match.pending_turn_events = []
             events.append(self._phase_event())
             await self.broadcast_delta(events)
         elif phase in (Phase.MAIN, Phase.COMBAT):
@@ -197,6 +220,12 @@ class MatchSession:
                 seat_index,
                 int(env.payload.get("attacker_uid", -1)),
                 int(env.payload.get("target_uid", -1)))
+        elif mtype == MsgType.INTENT_ACTIVATE.value:
+            ok, reason, events = self.match.activate(
+                seat_index,
+                int(env.payload.get("uid", -1)),
+                str(env.payload.get("ability", "")),
+                int(env.payload.get("target", 0)))
         else:
             ok, reason, events = False, f"Unknown intent {mtype!r}.", []
 
