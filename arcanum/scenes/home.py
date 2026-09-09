@@ -232,6 +232,9 @@ class HomeScene(Scene):
         label = NAV_ITEMS[index]
         if label == "Decks":
             self._open_decks()
+        elif label == "Packs":
+            from arcanum.scenes.packs import PacksScene
+            self.app.scenes.push(PacksScene(self.app))
         elif label != "Home":
             self._todo(label)
 
