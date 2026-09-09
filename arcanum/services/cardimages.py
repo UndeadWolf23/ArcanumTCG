@@ -73,3 +73,37 @@ def _download(image_name: str) -> None:
     finally:
         with _lock:
             _in_flight.discard(image_name)
+
+
+CARD_ASPECT = 1065 / 1477            # width / height of a rendered card
+
+
+def plausible_card_image(width: int, height: int) -> bool:
+    """Reject legacy objects (raw landscape art) that aren't card-shaped."""
+    if width <= 0 or height <= 0:
+        return False
+    aspect = width / height
+    return abs(aspect - CARD_ASPECT) / CARD_ASPECT < 0.18
+
+
+def prune(valid_names: set[str]) -> int:
+    """Delete cached files that no longer correspond to a library card.
+    Called after a library refresh; returns how many were removed."""
+    removed = 0
+    if not CACHE_DIR.is_dir():
+        return 0
+    valid_files = {_local_path(name).name for name in valid_names if name}
+    for path in CACHE_DIR.iterdir():
+        if path.suffix == ".part":
+            continue
+        if path.name not in valid_files:
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        log.info("Pruned %d stale card image(s) from the cache.", removed)
+    with _lock:
+        _failed.clear()          # names may exist again after a republish
+    return removed

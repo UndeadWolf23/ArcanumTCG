@@ -95,10 +95,19 @@ def refresh(done: Optional[Callable[[int, str], None]] = None) -> None:
         specs = _parse_rows(rows)
         _set_official(specs)
         try:
+            from arcanum.services import cardimages
+            cardimages.prune({spec.image for spec in specs})
+        except Exception:  # noqa: BLE001 - housekeeping must never break login
+            log.exception("Card image prune failed")
+        try:
             CACHE_FILE.write_text(json.dumps(rows), encoding="utf-8")
         except OSError:
             log.warning("Couldn't write card cache.")
-        log.info("Card library: %d official cards loaded.", len(specs))
+        if len(specs) <= 12:
+            log.info("Card library: %d official card(s): %s",
+                     len(specs), ", ".join(s.id for s in specs) or "(none)")
+        else:
+            log.info("Card library: %d official cards loaded.", len(specs))
         if done:
             done(len(specs), "")
 

@@ -36,6 +36,15 @@ TEAR_STRIP = 0.14          # top fraction of the pack that tears away
 TEAR_DISTANCE = 0.95       # horizontal drag (in pack widths) to finish
 
 
+def self_card_lookup(scene, card_id: str) -> CardDef:
+    card = cat.by_id(card_id)
+    if card is not None:
+        return card
+    # library changed underneath us; synthesize a placeholder
+    return CardDef(card_id=card_id, name=card_id, kind=cat.CATALOG[0].kind,
+                   cost=0, rarity=Rarity.COMMON)
+
+
 def _load_image(name: str) -> Optional[pygame.Surface]:
     for path in (IMAGES_DIR / name, ROOT_DIR / name):
         if path.is_file():
@@ -104,6 +113,8 @@ class PacksScene(Scene):
         self._pack_drop = 0.0
         self._hover_pack = None
         self._hover_card: Optional[CardReveal] = None
+        self._pinned: Optional[CardReveal] = None
+        self._spotlight: Optional[dict] = None    # legendary celebration
         self._img_cache: dict = {}
         self._pack_art: dict = {}
         self._back: Optional[pygame.Surface] = None
@@ -181,6 +192,10 @@ class PacksScene(Scene):
         return self._pack_art[key]
 
     def _card_back(self) -> pygame.Surface:
+        from arcanum.ui import cardback
+        image = cardback.get((self.card_w, self.card_h))
+        if image is not None:
+            return image
         if self._back is None:
             back = pygame.Surface((self.card_w, self.card_h), pygame.SRCALPHA)
             rect = back.get_rect()
@@ -207,6 +222,13 @@ class PacksScene(Scene):
             if path is not None:
                 try:
                     raw = pygame.image.load(str(path)).convert_alpha()
+                    if not cardimages.plausible_card_image(raw.get_width(),
+                                                           raw.get_height()):
+                        log.warning("Card image %s isn't card-shaped; using "
+                                    "fallback (republish to fix).", name)
+                        self._img_cache[key] = self._vector_face(
+                            self_card_lookup(self, key[0]), height)
+                        return self._img_cache[key]
                     width = int(raw.get_width() * height / raw.get_height())
                     surface = pygame.transform.smoothscale(raw, (width, height))
                     self._img_cache[key] = surface
@@ -324,6 +346,29 @@ class PacksScene(Scene):
         if reveal.card.rarity in (Rarity.EPIC, Rarity.LEGENDARY):
             self.shake = max(self.shake, 5.0 + tier * 2.5)
             self.flash = max(self.flash, 0.35)
+        if reveal.card.rarity is Rarity.LEGENDARY:
+            self._enter_spotlight(reveal)
+
+    def _enter_spotlight(self, reveal: CardReveal) -> None:
+        """Legendary celebration: the world dims, god-rays blaze from behind
+        the card, and gold detonates. Multiple legendaries share the stage."""
+        if self._spotlight is None:
+            self._spotlight = {"cards": [], "t": 0.0, "dur": 2.6}
+        if reveal not in self._spotlight["cards"]:
+            self._spotlight["cards"].append(reveal)
+        self._spotlight["t"] = 0.0
+        self.flash = 1.0
+        self.shake = max(self.shake, 16.0)
+        x, y = reveal.slot
+        gold = RARITY_FX[Rarity.LEGENDARY]
+        for radius in (60, 120, 190):
+            self.rings.append({"x": x, "y": y, "r": 10.0, "max": radius,
+                               "life": 1.0, "color": gold})
+        for _ in range(140):
+            self._spark((x, y), gold, speed=430)
+        for _ in range(30):
+            self._spark((x, y), (255, 255, 240), speed=560)
+        self.app.audio.ui_sound("attack")
 
     def _spark(self, pos, color, speed: float = 220.0) -> None:
         angle = random.uniform(0, math.tau)
@@ -366,6 +411,23 @@ class PacksScene(Scene):
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 self._tearing = False
         elif self.phase == REVEAL:
+            if self._spotlight is not None:
+                if event.type == pygame.MOUSEBUTTONUP:
+                    self._spotlight = None       # click to continue
+                return
+            if self._pinned is not None:
+                if event.type == pygame.MOUSEBUTTONDOWN:
+                    self._pinned = None
+                return
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+                for reveal in self.cards:
+                    if not reveal.flipped:
+                        continue
+                    rect = pygame.Rect(0, 0, self.card_w, self.card_h)
+                    rect.center = reveal.slot
+                    if rect.collidepoint(event.pos):
+                        self._pinned = reveal
+                        return
             if all(c.flipped for c in self.cards):
                 if self.btn_again.handle_event(event):
                     return
@@ -425,12 +487,18 @@ class PacksScene(Scene):
                 if launched_all:
                     self.phase = REVEAL
             self._hover_card = None
-            for reveal in self.cards:
-                rect = pygame.Rect(0, 0, self.card_w, self.card_h)
-                rect.center = reveal.slot
-                if rect.collidepoint(mouse) and reveal.landed:
-                    self._hover_card = reveal
-                    break
+            if self._spotlight is None and self._pinned is None:
+                for reveal in self.cards:
+                    rect = pygame.Rect(0, 0, self.card_w, self.card_h)
+                    rect.center = reveal.slot
+                    if rect.collidepoint(mouse) and reveal.landed:
+                        self._hover_card = reveal
+                        break
+
+        if self._spotlight is not None:
+            self._spotlight["t"] += dt
+            if self._spotlight["t"] >= self._spotlight["dur"]:
+                self._spotlight = None
 
         # particles + rings
         for p in self.particles:
@@ -493,12 +561,110 @@ class PacksScene(Scene):
             size = max(1, int(p["size"] * k))
             pygame.draw.circle(surface, p["color"],
                                (int(p["x"] + ox), int(p["y"] + oy)), size)
+        if self.phase == REVEAL and self._spotlight is not None:
+            self._draw_spotlight(surface)
+        elif self.phase == REVEAL and self._pinned is not None:
+            self._draw_pinned(surface)
+        elif self.phase == REVEAL and self._hover_card is not None \
+                and self._hover_card.flipped:
+            self._draw_hover_preview(surface)
+
         if self.flash > 0:
             veil = pygame.Surface((w, h), pygame.SRCALPHA)
             veil.fill((255, 245, 220, int(180 * self.flash)))
             surface.blit(veil, (0, 0))
 
         self.btn_back.draw(surface)
+
+    # ------------------------------------------------------ inspect + spotlight
+    def _big_card(self, card: CardDef, height: int):
+        return self._card_face(card, height) or self._vector_face(card, height)
+
+    def _draw_hover_preview(self, surface) -> None:
+        card = self._hover_card.card
+        image = self._big_card(card, int(surface.get_height() * 0.52))
+        mx, my = pygame.mouse.get_pos()
+        x = mx + 26
+        if x + image.get_width() > surface.get_width() - 10:
+            x = mx - image.get_width() - 26
+        y = max(10, min(my - image.get_height() // 2,
+                        surface.get_height() - image.get_height() - 10))
+        theme.draw_glow_rect(surface, pygame.Rect(x, y, image.get_width(),
+                                                  image.get_height()),
+                             RARITY_FX[card.rarity], 0.4, radius=12, spread=10)
+        surface.blit(image, (x, y))
+
+    def _draw_pinned(self, surface) -> None:
+        w, h = surface.get_size()
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((*theme.NAVY_ABYSS, 185))
+        surface.blit(veil, (0, 0))
+        card = self._pinned.card
+        image = self._big_card(card, int(h * 0.84))
+        rect = image.get_rect(center=(w // 2, h // 2))
+        theme.draw_glow_rect(surface, rect, RARITY_FX[card.rarity], 0.5,
+                             radius=16, spread=18)
+        surface.blit(image, rect)
+        theme.draw_text(surface, "Click anywhere to close",
+                        (w // 2, h - 24), theme.body_font(13),
+                        theme.TEXT_FAINT, anchor="center")
+
+    def _draw_spotlight(self, surface) -> None:
+        spot = self._spotlight
+        w, h = surface.get_size()
+        t = spot["t"]
+        appear = min(1.0, t * 5.0)
+        fade = min(1.0, max(0.0, (spot["dur"] - t) / 0.5))
+        strength = appear * fade
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((4, 6, 14, int(215 * strength)))
+        surface.blit(veil, (0, 0))
+        gold = RARITY_FX[Rarity.LEGENDARY]
+        for reveal in spot["cards"]:
+            x, y = reveal.slot
+            # god-rays: rotating fan of translucent golden wedges behind
+            rays = pygame.Surface((w, h), pygame.SRCALPHA)
+            count = 14
+            for k in range(count):
+                angle = t * 0.55 + k * math.tau / count
+                spread_a = 0.10 + 0.03 * math.sin(t * 2 + k)
+                length = h * (0.55 + 0.08 * math.sin(t * 1.3 + k * 1.7))
+                p1 = (x + math.cos(angle - spread_a) * length,
+                      y + math.sin(angle - spread_a) * length)
+                p2 = (x + math.cos(angle + spread_a) * length,
+                      y + math.sin(angle + spread_a) * length)
+                alpha = int(52 * strength * (0.6 + 0.4 * math.sin(t * 3 + k)))
+                pygame.draw.polygon(rays, (*gold, max(0, alpha)),
+                                    [(x, y), p1, p2])
+            surface.blit(rays, (0, 0))
+            # shining glimmer core behind the card
+            pulse = 0.75 + 0.25 * math.sin(t * 6)
+            for radius, alpha in ((int(150 * pulse), 60), (int(95 * pulse), 95),
+                                  (int(55 * pulse), 140)):
+                glow = pygame.Surface((radius * 2, radius * 2), pygame.SRCALPHA)
+                pygame.draw.circle(glow, (*gold, int(alpha * strength)),
+                                   (radius, radius), radius)
+                surface.blit(glow, (int(x - radius), int(y - radius)))
+            # the card itself, enlarged, riding above the rays
+            scale = 1.0 + 0.22 * min(1.0, t * 3.5)
+            image = self._big_card(reveal.card, int(self.card_h * scale))
+            rect = image.get_rect(center=(int(x), int(y - 14 * appear)))
+            theme.draw_glow_rect(surface, rect, gold,
+                                 min(1.0, 0.8 * strength * pulse),
+                                 radius=14, spread=22)
+            surface.blit(image, rect)
+            # trickling sparkles
+            if random.random() < 0.5:
+                self._spark((x + random.uniform(-60, 60),
+                             y + random.uniform(-90, 90)), gold, speed=70)
+        theme.draw_text(surface, "LEGENDARY",
+                        (w // 2, int(h * 0.10)),
+                        theme.display_font(int(40 * self.s), bold=True),
+                        gold, anchor="center",
+                        alpha=int(255 * strength))
+        theme.draw_text(surface, "click to continue",
+                        (w // 2, h - 26), theme.body_font(12),
+                        theme.TEXT_FAINT, anchor="center")
 
     def _draw_select(self, surface, ox, oy) -> None:
         s = self.s

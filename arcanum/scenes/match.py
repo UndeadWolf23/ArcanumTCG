@@ -261,9 +261,10 @@ class MatchScene(Scene):
         w, h = self.app.screen.get_size()
         s = max(0.72, min(1.3, h / 1080))
         self.ui_scale = s
-        self.card_size = (int(132 * s), int(184 * s))        # hand, larger
+        self.s = s
+        self.card_size = (int(158 * s), int(220 * s))        # hand
         self.board_card_size = (int(102 * s), int(143 * s))
-        self.champ_size = (int(138 * s), int(192 * s))       # champions, larger
+        self.champ_size = (int(168 * s), int(234 * s))       # champions
         self.relic_size = (int(78 * s), int(109 * s))
 
         self.champ_pos = (int(w * 0.130), int(h * 0.655))
@@ -284,7 +285,20 @@ class MatchScene(Scene):
                                            int(166 * s), int(52 * s)),
                                "To Combat", self._on_turn_button, sound_cb=ui)
         self.lnk_leave = LinkButton((int(70 * s), int(26 * s)), "Leave match",
-                                    self._leave, font_size=15)
+                                    self._ask_leave, font_size=15)
+        self._confirm_leave = False
+        dw = int(190 * s)
+        self.btn_leave_yes = Button(pygame.Rect(0, 0, dw, int(48 * s)),
+                                    "Leave match", self._leave,
+                                    font_size=16, sound_cb=ui)
+        self.btn_leave_no = Button(pygame.Rect(0, 0, dw, int(48 * s)),
+                                   "Keep playing", self._dismiss_leave,
+                                   primary=False, font_size=16, sound_cb=ui)
+        cx, cy = w // 2, h // 2
+        self.btn_leave_yes.rect.center = (cx - dw // 2 - int(12 * s),
+                                          cy + int(46 * s))
+        self.btn_leave_no.rect.center = (cx + dw // 2 + int(12 * s),
+                                         cy + int(46 * s))
         self.btn_cancel = Button(pygame.Rect(0, 0, int(120 * s), int(40 * s)),
                                  "Cancel", self._cancel_stage, primary=False,
                                  font_size=16, sound_cb=ui)
@@ -611,15 +625,27 @@ class MatchScene(Scene):
         return None
 
     # ------------------------------------------------------------ frame
+    def _ask_leave(self) -> None:
+        self._confirm_leave = True
+
+    def _dismiss_leave(self) -> None:
+        self._confirm_leave = False
+
     def handle_event(self, event: pygame.event.Event) -> None:
+        if self._confirm_leave:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self._dismiss_leave()
+            else:
+                self.btn_leave_yes.handle_event(event)
+                self.btn_leave_no.handle_event(event)
+            return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             if self.pending_spell is not None:
                 self._cancel_stage()
                 return
-            from arcanum.scenes.settings import SettingsScene
             self._cancel_drag()
             self.attack_source = None
-            self.app.scenes.push(SettingsScene(self.app))
+            self._ask_leave()
             return
         for widget in self.widgets:
             if widget.handle_event(event):
@@ -746,6 +772,9 @@ class MatchScene(Scene):
                                  and not self._flow_busy
                                  and self.match.phase in (Phase.MAIN, Phase.COMBAT))
 
+        if self._confirm_leave:
+            self.btn_leave_yes.update(dt)
+            self.btn_leave_no.update(dt)
         for widget in self.widgets:
             widget.update(dt)
         apply_cursor(self.widgets,
@@ -835,6 +864,24 @@ class MatchScene(Scene):
         self._draw_floats(surface)
         self._draw_preview(surface)
         self._draw_toast(surface)
+        if self._confirm_leave:
+            dw, dh = surface.get_size()
+            veil = pygame.Surface((dw, dh), pygame.SRCALPHA)
+            veil.fill((*theme.NAVY_ABYSS, 190))
+            surface.blit(veil, (0, 0))
+            box = pygame.Rect(0, 0, int(470 * self.s), int(170 * self.s))
+            box.center = (dw // 2, dh // 2)
+            theme.draw_glow_rect(surface, box, theme.GOLD, 0.35, radius=14,
+                                 spread=14)
+            theme.draw_panel(surface, box, fill=theme.NAVY,
+                             border=theme.GOLD_DIM, radius=14)
+            theme.draw_text(surface,
+                            "Are you sure you want to leave the match?",
+                            (box.centerx, box.y + int(44 * self.s)),
+                            theme.body_font(int(17 * self.s), bold=True),
+                            theme.TEXT, anchor="center")
+            self.btn_leave_yes.draw(surface)
+            self.btn_leave_no.draw(surface)
         self._draw_result(surface)
 
     def _draw_arrows(self, surface: pygame.Surface) -> None:
@@ -1019,6 +1066,11 @@ class MatchScene(Scene):
                                 int(cy + ry * math.sin(trail) * 0.92)), 1)
 
     def _draw_card_back(self, surface: pygame.Surface, rect: pygame.Rect) -> None:
+        from arcanum.ui import cardback
+        image = cardback.get(rect.size)
+        if image is not None:
+            surface.blit(image, rect)
+            return
         theme.draw_panel(surface, rect, fill=theme.NAVY, border=theme.GOLD_DIM,
                          radius=6)
         pygame.draw.circle(surface, theme.GOLD_DIM, rect.center,
@@ -1167,13 +1219,13 @@ class MatchScene(Scene):
     def _draw_mana(self, surface: pygame.Surface) -> None:
         player = self.match.player(0)
         h = surface.get_height()
-        size = 24
-        step = size + 4
+        size = 36
+        step = size + 6
         x = 34
         top = h // 2 - (MAX_MANA * step) // 2
         theme.draw_text(surface, f"{player.mana}/{player.max_mana}",
-                        (x + size // 2, top - 24),
-                        theme.body_font(18, bold=True), MANA_CORE,
+                        (x + size // 2, top - 28),
+                        theme.body_font(20, bold=True), MANA_CORE,
                         anchor="center")
         icons = self._energy_icons(size)
         for i in range(MAX_MANA):

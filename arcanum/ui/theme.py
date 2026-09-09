@@ -73,6 +73,10 @@ def draw_text(
     return rect
 
 
+_PANEL_CACHE: dict[tuple, pygame.Surface] = {}
+_PANEL_CACHE_MAX = 256
+
+
 def draw_panel(
     surface: pygame.Surface,
     rect: pygame.Rect,
@@ -81,9 +85,48 @@ def draw_panel(
     radius: int = 10,
     border_width: int = 1,
 ) -> None:
-    pygame.draw.rect(surface, fill, rect, border_radius=radius)
-    if border:
-        pygame.draw.rect(surface, border, rect, width=border_width, border_radius=radius)
+    """Rounded panel with anti-aliased edges (rendered at 2x, downsampled,
+    cached per shape). Falls back to plain rects if scaling is unavailable."""
+    key = (rect.width, rect.height, fill, border, radius, border_width)
+    panel = _PANEL_CACHE.get(key)
+    if panel is None:
+        try:
+            big = pygame.Surface((max(2, rect.width * 2),
+                                  max(2, rect.height * 2)), pygame.SRCALPHA)
+            pygame.draw.rect(big, fill, big.get_rect(),
+                             border_radius=radius * 2)
+            if border:
+                pygame.draw.rect(big, border, big.get_rect(),
+                                 width=max(1, border_width * 2),
+                                 border_radius=radius * 2)
+            panel = pygame.transform.smoothscale(big,
+                                                 (rect.width, rect.height))
+        except (pygame.error, ValueError):
+            pygame.draw.rect(surface, fill, rect, border_radius=radius)
+            if border:
+                pygame.draw.rect(surface, border, rect, width=border_width,
+                                 border_radius=radius)
+            return
+        if len(_PANEL_CACHE) > _PANEL_CACHE_MAX:
+            _PANEL_CACHE.clear()
+        _PANEL_CACHE[key] = panel
+    surface.blit(panel, rect.topleft)
+
+
+def aa_circle(surface: pygame.Surface, color, center, radius: int,
+              width: int = 0) -> None:
+    """Anti-aliased circle via gfxdraw (fallback: plain draw.circle)."""
+    x, y, radius = int(center[0]), int(center[1]), max(1, int(radius))
+    try:
+        from pygame import gfxdraw
+        if width == 0:
+            gfxdraw.filled_circle(surface, x, y, radius, color)
+            gfxdraw.aacircle(surface, x, y, radius, color)
+        else:
+            for r in range(radius - width + 1, radius + 1):
+                gfxdraw.aacircle(surface, x, y, r, color)
+    except (ImportError, AttributeError, OverflowError, pygame.error):
+        pygame.draw.circle(surface, color, (x, y), radius, width)
 
 
 _GLOW_CACHE: dict[tuple, pygame.Surface] = {}
