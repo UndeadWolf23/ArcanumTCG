@@ -49,9 +49,9 @@ RARITY_TINT = {Rarity.COMMON: (26, 32, 52), Rarity.UNCOMMON: (20, 40, 32),
                Rarity.RARE: (18, 30, 56), Rarity.EPIC: (34, 22, 54),
                Rarity.LEGENDARY: (44, 36, 16)}
 
-TYPE_FILTERS = ["All types", "Heroes", "Champions", "Minions", "Spells",
-                "Relics", "Barriers"]
-TYPE_KEYS = [None, "hero", "champion", "minion", "spell", "relic", "barrier"]
+TYPE_FILTERS = ["All types", "Heroes", "Champions", "Spells", "Relics",
+                "Barriers"]
+TYPE_KEYS = [None, "hero", "champion", "spell", "relic", "barrier"]
 COST_FILTERS = ["Any cost"] + [str(i) for i in range(10)] + ["10+"]
 RARITY_FILTERS = ["All rarities"] + [r.value.title() for r in Rarity]
 SORTS = ["Sort: Cost", "Sort: Name", "Sort: Rarity"]
@@ -94,27 +94,29 @@ class BrowseCard:
 
 
 def build_library() -> list[BrowseCard]:
-    """Everything browsable: deck-legal cards plus not-yet-playable types."""
+    """Everything deck-buildable: heroes, spells, relics, champions,
+    barriers — built-in and published. Minions are tokens, never cards."""
     out: list[BrowseCard] = []
     seen: set[str] = set()
     for card in cat.all_cards():
-        spec = card_library.get_spec(card.card_id)
+        spec = cat.spec_by_id(card.card_id)
         type_key = spec.card_type.value if spec else \
             _KIND_TO_TYPE.get(card.kind, "hero")
         out.append(BrowseCard(card.card_id, card.name, type_key, card.cost,
                               card.rarity, card.text, card.attack,
                               card.health, playable=True))
         seen.add(card.card_id)
-    for spec in card_library.official_cards():
+    for spec in cat.all_specs():
         if spec.id in seen:
             continue
-        if spec.card_type in (CardType.CHAMPION, CardType.MINION,
-                              CardType.BARRIER):
+        if spec.card_type is CardType.MINION:
+            continue                       # tokens live on the board, not decks
+        if spec.card_type in (CardType.CHAMPION, CardType.BARRIER):
             out.append(BrowseCard(spec.id, spec.name, spec.card_type.value,
                                   spec.cost, Rarity.parse(spec.rarity.value),
                                   spec.composed_text(), spec.attack,
                                   spec.health, spec.durability,
-                                  playable=False))
+                                  playable=True))
     return out
 
 
@@ -370,6 +372,15 @@ class DeckBuilderScene(Scene):
             self._show_toast(f"{card.type_label}s aren't playable yet — "
                              "coming with the next engine update.")
             return
+        if card.type_key == "champion":
+            current = next((cid for cid in self.deck.cards
+                            if cat.card_type_of(cid) == "champion"), None)
+            if current is not None and current != card.card_id:
+                holder = self._browse_by_id(current)
+                self._show_toast("A deck can only have one champion "
+                                 f"({holder.name if holder else current} is "
+                                 "already in this deck).")
+                return
         have = self.deck.cards.get(card.card_id, 0)
         limit = min(max_copies(card.card_id),
                     self.collection.get(card.card_id, 0))
@@ -777,6 +788,19 @@ class DeckBuilderScene(Scene):
                             (rect.right - int(8 * s), rect.centery),
                             theme.body_font(int(13 * s), bold=True),
                             theme.TEXT, anchor="midright")
+
+        # champion status
+        champ_id = next((cid for cid in self.deck.cards
+                         if cat.card_type_of(cid) == "champion"), None)
+        champ = self._browse_by_id(champ_id) if champ_id else None
+        champ_text = f"Champion:  {champ.name}" if champ \
+            else "No champion — every deck needs one!"
+        champ_color = theme.SUCCESS if champ else theme.DANGER
+        theme.draw_text(surface, champ_text,
+                        (self.side_rect.centerx,
+                         self.btn_save.rect.y - int(118 * s)),
+                        theme.body_font(int(12 * s), bold=champ is None),
+                        champ_color, anchor="center")
 
         # count + curve
         size = self.deck.size

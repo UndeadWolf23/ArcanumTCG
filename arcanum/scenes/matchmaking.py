@@ -22,6 +22,7 @@ import pygame
 from arcanum.core.constants import IMAGES_DIR, ROOT_DIR
 from arcanum.core.events import Events
 from arcanum.core.scene import Scene
+from arcanum.game.catalog import starter_deck_cards
 from arcanum.services.decks import DeckRecord, DeckResult
 from arcanum.services.net.protocol import MsgType
 from arcanum.ui import theme
@@ -30,7 +31,8 @@ from arcanum.ui.widgets import Button, apply_cursor
 log = logging.getLogger(__name__)
 
 PICK, SEARCH = range(2)
-STARTER = DeckRecord(id="", name="Starter Deck", cards={})
+STARTER = DeckRecord(id="", name="Starter Deck",
+                     cards=starter_deck_cards())
 CONNECT_TIMEOUT = 25.0
 
 MODE_TITLES = {"pvp": "Versus — find an opponent",
