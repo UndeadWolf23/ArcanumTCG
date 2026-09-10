@@ -55,6 +55,7 @@ def _load_art(name: str):
 
 class HomeScene(Scene):
     def on_enter(self, **kwargs) -> None:
+        self._refresh_economy()
         self._time = 0.0
         self.toast = ""
         self._toast_timer = 0.0
@@ -267,6 +268,13 @@ class HomeScene(Scene):
                     action()
                     return
 
+    def _refresh_economy(self) -> None:
+        state = getattr(getattr(self.app.backend.net, "state", None),
+                        "name", "")
+        if state == "CONNECTED":
+            from arcanum.services.net.protocol import MsgType
+            self.app.backend.net.send(MsgType.ECONOMY_GET, {})
+
     def _claim(self, slot: int) -> None:
         from arcanum.services.net.protocol import MsgType
         self.app.backend.net.send(MsgType.CLAIM_CHALLENGE, {"slot": slot})
@@ -277,6 +285,20 @@ class HomeScene(Scene):
         self._claim_rects = []
         wallet = self.app.backend.wallet
         if not wallet.get("enabled"):
+            state = getattr(getattr(self.app.backend.net, "state", None),
+                            "name", "")
+            if state == "CONNECTED" and wallet:
+                s = self.s
+                w, h = surface.get_size()
+                hint = pygame.Rect(0, 0, int(380 * s), int(40 * s))
+                hint.bottomright = (w - int(24 * s), h - int(24 * s))
+                theme.draw_panel(surface, hint, fill=theme.NAVY,
+                                 border=theme.NAVY_EDGE, radius=12)
+                theme.draw_text(surface,
+                                "Economy offline — server is missing its "
+                                "service key",
+                                hint.center, theme.body_font(int(11 * s)),
+                                theme.TEXT_FAINT, anchor="center")
             return
         s = self.s
         w, h = surface.get_size()

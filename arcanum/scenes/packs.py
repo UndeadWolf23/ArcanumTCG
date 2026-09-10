@@ -720,8 +720,15 @@ class PacksScene(Scene):
 
     def _draw_select(self, surface, ox, oy) -> None:
         s = self.s
-        subtitle = ("Choose a pack to open" if self._economy_on()
-                    else "Practice mode — connect to use your real packs")
+        state = getattr(getattr(self.app.backend.net, "state", None),
+                        "name", "")
+        if self._economy_on():
+            subtitle = "Choose a pack to open"
+        elif state == "CONNECTED":
+            subtitle = ("Practice mode — the server's economy is offline "
+                        "(packs opened here aren't saved)")
+        else:
+            subtitle = "Practice mode — sign in online to use your real packs"
         theme.draw_text(surface, subtitle,
                         (surface.get_width() // 2, int(78 * s)),
                         theme.body_font(int(15 * s)), theme.TEXT_DIM,
@@ -759,10 +766,6 @@ class PacksScene(Scene):
                                 (rect.centerx, rect.bottom + int(48 * s)),
                                 theme.body_font(int(12 * s)), color,
                                 anchor="center")
-            theme.draw_text(surface, "FREE",
-                            (rect.centerx, rect.bottom + int(50 * s)),
-                            theme.body_font(int(13 * s)), theme.SUCCESS,
-                            anchor="center")
             if hover:
                 self._draw_odds(surface, pack, rect)
 

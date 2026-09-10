@@ -178,6 +178,8 @@ async def handler(websocket):
         social.register(conn)
         log.info("HELLO from %s (%s) — %d online", conn.name, peer, len(CONNECTED))
         await websocket.send(logic.make_welcome(conn.name, len(CONNECTED)).encode())
+        asyncio.get_running_loop().create_task(
+            conn._send_economy(first=True))
 
         async for raw in websocket:
             try:
@@ -207,6 +209,12 @@ async def handler(websocket):
 
 
 async def main() -> None:
+    if economy.enabled():
+        log.info("Economy: ENABLED (service key present).")
+    else:
+        log.warning("Economy: DISABLED — set the SUPABASE_SERVICE_KEY "
+                    "environment variable to enable gold, packs, and "
+                    "dailies.")
     port = int(os.environ.get("PORT", "10000"))
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
