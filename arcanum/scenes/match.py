@@ -48,8 +48,8 @@ ARROW_SPELL = (110, 170, 255)
 
 PHASE_LABELS = {Phase.DRAW: "Draw", Phase.MAIN: "Main",
                 Phase.COMBAT: "Combat", Phase.END: "End"}
-KIND_LABELS = {Kind.CREATURE: "Creature", Kind.SPELL: "Spell",
-               Kind.RELIC: "Relic", Kind.CHAMPION: "Champion"}
+KIND_LABELS = {Kind.CREATURE: "Hero", Kind.SPELL: "Spell",
+               Kind.RELIC: "Relic", Kind.CHAMPION: "Champion", Kind.BARRIER: "Barrier"}
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +202,8 @@ class MatchScene(Scene):
         self.board: list[CardSprite] = []
         self.opp_board: list[CardSprite] = []
         self.relics: list[CardSprite] = []
+        self.barriers: list[CardSprite] = []
+        self.opp_barriers: list[CardSprite] = []
         self.opp_relics: list[CardSprite] = []
         self.champ: Optional[CardSprite] = None
         self.opp_champ: Optional[CardSprite] = None
@@ -275,6 +277,9 @@ class MatchScene(Scene):
         self.creature_span = (int(w * 0.27), int(w * 0.73))
         self.own_row_y = int(h * 0.585)
         self.opp_row_y = int(h * 0.295)
+        self.barrier_anchor = (int(w * 0.19), int(h * 0.585))
+        self.opp_barrier_anchor = (int(w * 0.19), int(h * 0.295))
+        self.barrier_size = (int(74 * s), int(103 * s))
         self.stage_pos = (w // 2, int(h * 0.62))             # staged spell hover
 
         self.hand_y = h - int(self.card_size[1] * 0.52)
@@ -520,7 +525,15 @@ class MatchScene(Scene):
     # ------------------------------------------------------------ event fx
     def _place_played_sprite(self, sprite: CardSprite, owner: int) -> None:
         sprite.start_drop()
-        if sprite.card.kind is Kind.CREATURE:
+        if sprite.card.kind is Kind.BARRIER:
+            group = self.barriers if owner == 0 else self.opp_barriers
+            group.append(sprite)
+            anchor = self.barrier_anchor if owner == 0 \
+                else self.opp_barrier_anchor
+            for i, b in enumerate(group):
+                b.tx = anchor[0] + i * int(self.barrier_size[0] * 1.12)
+                b.ty = anchor[1]
+        elif sprite.card.kind is Kind.CREATURE:
             (self.board if owner == 0 else self.opp_board).append(sprite)
         elif sprite.card.kind is Kind.RELIC:
             (self.relics if owner == 0 else self.opp_relics).append(sprite)
@@ -573,12 +586,14 @@ class MatchScene(Scene):
         state = self.controller.state
         live: dict[int, CardInstance] = {}
         for player in state.players:
-            for card in player.board + player.relics + player.hand:
+            for card in (player.board + player.relics + player.barriers
+                         + player.hand):
                 live[card.uid] = card
             if player.champion is not None:
                 live[player.champion.uid] = player.champion
         for group in (self.board, self.opp_board, self.relics,
-                      self.opp_relics, self.hand):
+                      self.opp_relics, self.barriers, self.opp_barriers,
+                      self.hand):
             for sprite in group:
                 fresh = live.get(sprite.card.uid)
                 if fresh is not None and fresh is not sprite.card:
@@ -590,15 +605,25 @@ class MatchScene(Scene):
                     sprite.card = fresh
 
     def _sprite_for(self, owner: int, uid: int) -> Optional[CardSprite]:
-        pools: list[CardSprite] = list(self.board if owner == 0 else self.opp_board)
+        pools: list[CardSprite] = list(self.board if owner == 0
+                                       else self.opp_board)
+        pools += list(self.barriers if owner == 0 else self.opp_barriers)
+        pools += list(self.relics if owner == 0 else self.opp_relics)
         champ = self.champ if owner == 0 else self.opp_champ
         if champ is not None:
             pools.append(champ)
         return next((s for s in pools if s.card.uid == uid), None)
 
     def _kill_sprite(self, owner: int, uid: int) -> None:
-        row = self.board if owner == 0 else self.opp_board
-        sprite = next((s for s in row if s.card.uid == uid), None)
+        rows = [self.board if owner == 0 else self.opp_board,
+                self.barriers if owner == 0 else self.opp_barriers,
+                self.relics if owner == 0 else self.opp_relics]
+        sprite, row = None, None
+        for candidate in rows:
+            sprite = next((s for s in candidate if s.card.uid == uid), None)
+            if sprite is not None:
+                row = candidate
+                break
         if sprite is None:
             log.warning("death event for unknown sprite uid=%s", uid)
             return
@@ -710,10 +735,17 @@ class MatchScene(Scene):
         return None
 
     def _attack_target_under(self, pos: tuple[int, int]) -> Optional[CardSprite]:
-        legal = {c.uid for c in self.match.valid_attack_targets(0)}
+        attacker_card = self.attack_source.card \
+            if self.attack_source is not None else None
+        legal = {c.uid for c in
+                 self.match.valid_attack_targets(0, attacker_card)}
         for sprite in reversed(self.opp_board):
             if sprite.card.uid in legal and \
                     sprite.rect(self.board_card_size).collidepoint(pos):
+                return sprite
+        for sprite in reversed(self.opp_barriers):
+            if sprite.card.uid in legal and \
+                    sprite.rect(self.barrier_size).collidepoint(pos):
                 return sprite
         champ = self.opp_champ
         if champ is not None and champ.card.uid in legal and \
@@ -723,7 +755,8 @@ class MatchScene(Scene):
 
     # ------------------------------------------------------------ hover helpers
     def _field_sprites(self) -> list[CardSprite]:
-        sprites = self.opp_relics + self.relics + self.opp_board + self.board
+        sprites = (self.opp_relics + self.relics + self.opp_barriers
+                   + self.barriers + self.opp_board + self.board)
         if self.opp_champ is not None:
             sprites.append(self.opp_champ)
         if self.champ is not None:
@@ -735,6 +768,8 @@ class MatchScene(Scene):
             return self.champ_size
         if sprite in self.relics or sprite in self.opp_relics:
             return self.relic_size
+        if sprite in self.barriers or sprite in self.opp_barriers:
+            return self.barrier_size
         if sprite in self.hand or sprite is self.pending_spell:
             return self.card_size
         return self.board_card_size
@@ -799,7 +834,7 @@ class MatchScene(Scene):
                 if target is not None:
                     self._execute_stage(target)
                 else:
-                    self._show_toast("Click an enemy creature — or Cancel.")
+                    self._show_toast("Click an enemy hero — or Cancel.")
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
                 self._cancel_stage()
             return
@@ -838,7 +873,7 @@ class MatchScene(Scene):
                     else:
                         self._show_toast(reason)
                 elif self.match.phase is Phase.MAIN:
-                    self._show_toast("Creatures attack during your combat phase.")
+                    self._show_toast("Heroes attack during your combat phase.")
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
             sprite = self._field_sprite_under(event.pos)
             if sprite is not None:
@@ -872,7 +907,7 @@ class MatchScene(Scene):
                     if (champ is not None and self.match.player(1).board
                             and champ.rect(self.champ_size).collidepoint(event.pos)):
                         self._guard_flash = 1.0   # creatures block the champion
-                        self._show_toast("Enemy creatures must be dealt with first.")
+                        self._show_toast("Enemy heroes must be dealt with first.")
                     return                       # arrow released on nothing
                 ok, reason = self.match.can_attack(0, attacker.card.uid)
                 if not ok:
@@ -996,6 +1031,10 @@ class MatchScene(Scene):
                             targeted=targeted)
         if self.champ is not None:
             self._draw_card(surface, self.champ, self.champ_size)
+        for sprite in self.opp_barriers:
+            self._draw_card(surface, sprite, self.barrier_size, compact=True)
+        for sprite in self.barriers:
+            self._draw_card(surface, sprite, self.barrier_size, compact=True)
         for sprite in self.opp_board:
             self._draw_card(surface, sprite, self.board_card_size,
                             targeted=(sprite.card.uid == self._target_uid))
@@ -1068,12 +1107,22 @@ class MatchScene(Scene):
                                          radius=10, spread=9)
             return
         if self.attack_source is not None:
-            legal = {c.uid for c in self.match.valid_attack_targets(0)}
+            attacker_card = self.attack_source.card
+            legal = {c.uid for c in
+                     self.match.valid_attack_targets(0, attacker_card)}
             for sprite in self.opp_board:
                 if sprite.card.uid in legal:
                     strong = sprite.card.uid == self._target_uid
                     theme.draw_glow_rect(surface, sprite.rect(self.board_card_size),
                                          ARROW_ATTACK, 0.8 if strong else pulse,
+                                         radius=10, spread=9)
+            for sprite in self.opp_barriers:
+                if sprite.card.uid in legal:
+                    strong = sprite.card.uid == self._target_uid
+                    theme.draw_glow_rect(surface,
+                                         sprite.rect(self.barrier_size),
+                                         ARROW_ATTACK,
+                                         0.8 if strong else pulse,
                                          radius=10, spread=9)
             champ = self.opp_champ
             if champ is not None and champ.card.uid in legal:

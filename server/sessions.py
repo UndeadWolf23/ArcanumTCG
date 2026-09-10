@@ -49,8 +49,9 @@ def redact_events(events: list[dict[str, Any]], viewer: int) -> list[dict[str, A
         if event.get("type") == "phase" and "active" in event:
             event["your_turn"] = event.pop("active") == viewer
         card = event.pop("card", None)
-        if event.get("type") == "played" and card is not None:
-            event["card"] = card_to_dict(card)
+        if event.get("type") in ("played", "spawn") and card is not None:
+            event["card"] = card_to_dict(card) if not isinstance(card, dict) \
+                else card
         elif event.get("type") == "draw":
             if event["player"] == 0 and card is not None:
                 event["card_uid"] = card.uid

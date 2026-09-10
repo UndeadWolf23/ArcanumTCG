@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 
 MAX_MANA = 12
 CREATURE_LIMIT = 6
+BARRIER_LIMIT = 4          # 1 champion barrier + up to 3 hero barriers
 RELIC_LIMIT = 3
 HAND_LIMIT = 10
 STARTING_HAND = 7
@@ -68,6 +69,7 @@ class Kind(str, Enum):
     SPELL = "spell"
     RELIC = "relic"
     CHAMPION = "champion"
+    BARRIER = "barrier"
 
 
 class Effect(str, Enum):
@@ -95,6 +97,7 @@ class CardInstance:
     is_token: bool = False      # minions spawned by effects
     transformed: bool = False
     thorns_used: bool = False   # Thorns triggers once per turn
+    ward_used: bool = False     # Ward: first damage each turn prevented
     undying_spent: bool = False # Undying triggers once ever
 
     def add_charge(self, kind: str, amount: int = 1) -> int:
@@ -130,6 +133,8 @@ class PlayerState:
     hand: list[CardInstance] = field(default_factory=list)
     pile: list[CardInstance] | None = None      # None = endless random deck
     unspent_last_turn: int = 0
+    barriers: list[CardInstance] = field(default_factory=list)
+    shielded_until_turn: int = 0     # Last Wall: champion damage immunity
     board: list[CardInstance] = field(default_factory=list)    # creatures
     relics: list[CardInstance] = field(default_factory=list)
     max_mana: int = 0
@@ -189,6 +194,14 @@ class MatchState:
                             attack=0, health=health, max_health=health,
                             text=text)
 
+    def _barrier_from_spec(self, spec) -> CardInstance:
+        inst = CardInstance(self._uid(), spec.name, Kind.BARRIER, spec.cost,
+                            attack=0, health=max(1, spec.durability),
+                            max_health=max(1, spec.durability),
+                            text=spec.composed_text())
+        inst.keywords = {ref.id: ref.value for ref in spec.keywords}
+        return inst
+
     def _instance_from_def(self, card_def) -> CardInstance:
         from arcanum.game import catalog as cat
         inst = CardInstance(
@@ -217,7 +230,10 @@ class MatchState:
                         "Defeat the enemy champion to win.")
                 continue
             if kind == "barrier":
-                skipped_barriers += count      # zone lands in engine v2
+                spec = cat.spec_by_id(card_id)
+                if spec is not None:
+                    for _ in range(count):
+                        pile.append(self._barrier_from_spec(spec))
                 continue
             card_def = cat.by_id(card_id)
             if card_def is None:
@@ -298,6 +314,16 @@ class MatchState:
             creature.exhausted = False
             creature.sick = False
             creature.thorns_used = False
+        for barrier in player.barriers:
+            barrier.ward_used = False
+            regen = barrier.kw_value("regenerate", 0) \
+                if barrier.has_kw("regenerate") else 0
+            if regen:
+                barrier.health = min(barrier.max_health,
+                                     barrier.health + regen)
+                self.pending_turn_events.append(
+                    {"type": "heal", "player": index, "uid": barrier.uid,
+                     "amount": regen, "health": barrier.health})
         self.pending_turn_events: list[Event] = []
         self.upkeep_triggers(self.pending_turn_events)
 
@@ -359,6 +385,8 @@ class MatchState:
         player = self.players[index]
         if player.mana < card.cost:
             return False, f"Not enough mana ({player.mana}/{card.cost})."
+        if card.kind is Kind.BARRIER and len(player.barriers) >= BARRIER_LIMIT:
+            return False, f"Barrier slots are full ({BARRIER_LIMIT} max).", []
         if card.kind is Kind.CREATURE and len(player.board) >= CREATURE_LIMIT:
             return False, f"Creature row is full ({CREATURE_LIMIT} max)."
         if card.kind is Kind.RELIC and len(player.relics) >= RELIC_LIMIT:
@@ -390,7 +418,9 @@ class MatchState:
         player.mana -= card.cost
         events: list[Event] = [{"type": "played", "player": index, "card": card}]
 
-        if card.kind is Kind.CREATURE:
+        if card.kind is Kind.BARRIER:
+            player.barriers.append(card)
+        elif card.kind is Kind.CREATURE:
             card.sick = not (card.haste or card.has_kw("rush"))
             player.board.append(card)
             # Enter-the-battlefield effects (e.g. Charged) resolve before
@@ -482,11 +512,36 @@ class MatchState:
                            "it can attack next turn.")
         return True, ""
 
-    def valid_attack_targets(self, index: int) -> list[CardInstance]:
-        """Enemy creatures; the enemy champion only once their board is empty."""
+    def valid_attack_targets(self, index: int,
+                             attacker: CardInstance | None = None
+                             ) -> list[CardInstance]:
+        """Targeting law of the table:
+        * Umbral attackers strike from another plane — any hero or the
+          champion, ignoring barriers and defenders. But Umbral heroes can
+          only be attacked BY Umbral or Veil Pierce attackers.
+        * While the defender controls a barrier, non-Umbral attackers must
+          attack barriers before heroes or the champion.
+        * With no barriers, heroes defend the champion as before."""
         enemy = self.players[1 - index]
-        if enemy.board:
-            return list(enemy.board)
+        umbral = attacker is not None and attacker.has_kw("umbral")
+        pierce_veil = attacker is not None and (attacker.has_kw("veil_pierce")
+                                                or umbral)
+
+        def visible(hero: CardInstance) -> bool:
+            return not hero.has_kw("umbral") or pierce_veil
+
+        if umbral:
+            targets = [h for h in enemy.board if visible(h)]
+            if enemy.champion is not None:
+                targets.append(enemy.champion)
+            return targets
+        if enemy.barriers:
+            return list(enemy.barriers)
+        heroes = [h for h in enemy.board if visible(h)]
+        if heroes:
+            return heroes
+        if any(not visible(h) for h in enemy.board):
+            return []          # only umbral defenders: nothing you can reach
         return [enemy.champion] if enemy.champion else []
 
     # ------------------------------------------------------------ the stack
@@ -494,7 +549,8 @@ class MatchState:
         """(owner, card, zone) anywhere on the table."""
         for i, player in enumerate(self.players):
             for zone_name, zone in (("board", player.board),
-                                    ("relics", player.relics)):
+                                    ("relics", player.relics),
+                                    ("barriers", player.barriers)):
                 for card in zone:
                     if card.uid == uid:
                         return i, card, zone_name
@@ -754,11 +810,13 @@ class MatchState:
         attacker = next(c for c in self.players[index].board
                         if c.uid == attacker_uid)
         enemy = self.players[1 - index]
-        targets = self.valid_attack_targets(index)
+        targets = self.valid_attack_targets(index, attacker)
         target = next((t for t in targets if t.uid == target_uid), None)
         if target is None:
+            if enemy.barriers:
+                return False, "Their barriers must be broken first.", []
             if enemy.board and enemy.champion and target_uid == enemy.champion.uid:
-                return False, "Enemy creatures must be dealt with first.", []
+                return False, "Enemy heroes must be dealt with first.", []
             return False, "That isn't a legal attack target.", []
 
         attacker.exhausted = True
@@ -772,6 +830,23 @@ class MatchState:
         def hit(source, victim, amount: int, combat: bool) -> None:
             """One packet of damage, with on-damage keyword triggers."""
             if amount <= 0 or victim.health <= 0:
+                return
+            victim_owner_early = owner_of(victim)
+            # Last Wall: the champion cannot take damage this round
+            if victim.kind is Kind.CHAMPION and \
+                    self.players[victim_owner_early].shielded_until_turn \
+                    > self.turn_number:
+                events.append({"type": "keyword", "keyword": "last_wall",
+                               "player": victim_owner_early,
+                               "uid": victim.uid})
+                return
+            # Ward: a barrier shrugs off its first damage each turn
+            if victim.kind is Kind.BARRIER and victim.has_kw("ward") \
+                    and not victim.ward_used:
+                victim.ward_used = True
+                events.append({"type": "keyword", "keyword": "ward",
+                               "player": victim_owner_early,
+                               "uid": victim.uid})
                 return
             victim_owner = owner_of(victim)
             victim.health -= amount
@@ -796,6 +871,25 @@ class MatchState:
             if (victim.kind is Kind.CHAMPION and victim is not champ
                     and source.has_kw("intelligent")):
                 events.append(self._draw_one(source_owner))
+            if victim.kind is Kind.BARRIER:
+                if victim.has_kw("reflect") and source.kind is Kind.CREATURE \
+                        and source.health > 0:
+                    sting = victim.kw_value("reflect", 1)
+                    events.append({"type": "keyword", "keyword": "reflect",
+                                   "player": victim_owner, "uid": victim.uid})
+                    hit(victim, source, sting, combat=False)
+                if victim.health <= 0:
+                    self.players[victim_owner].barriers.remove(victim)
+                    events.append({"type": "death", "player": victim_owner,
+                                   "uid": victim.uid})
+                    if victim.has_kw("last_wall"):
+                        self.players[victim_owner].shielded_until_turn = \
+                            self.turn_number + 2
+                        events.append({"type": "keyword",
+                                       "keyword": "last_wall",
+                                       "player": victim_owner,
+                                       "uid": victim.uid})
+                return
             if victim.kind is Kind.CREATURE:
                 # Lethal: any damage to a hero destroys it
                 if source.has_kw("lethal") and source.kind is Kind.CREATURE:
@@ -850,6 +944,9 @@ class MatchState:
                 events.append({"type": "keyword", "keyword": "pierce",
                                "player": index, "uid": attacker.uid})
                 hit(attacker, enemy_champ, 1, combat=False)
+        elif target.kind is Kind.BARRIER:
+            hit(attacker, target, self.effective_attack(attacker, index),
+                combat=True)
         else:
             hit(attacker, target, self.effective_attack(attacker, index),
                 combat=True)

@@ -128,8 +128,9 @@ class LocalController(MatchController):
             event = dict(event)
             etype = event.get("type")
             card = event.pop("card", None)
-            if etype == "played" and card is not None:
-                event["card"] = card_to_dict(card)
+            if etype in ("played", "spawn") and card is not None:
+                event["card"] = card_to_dict(card) if not isinstance(card, dict) \
+                    else card
             elif etype == "draw":
                 if event.get("player") == 1:
                     event["hidden"] = True

@@ -75,7 +75,7 @@ CATALOG: tuple[CardDef, ...] = (
     CardDef("s_insight", "Astral Insight", Kind.SPELL, 3, Rarity.COMMON,
             text="Draw 2 cards.", effect=Effect.DRAW_TWO),
     CardDef("s_star", "Falling Star", Kind.SPELL, 3, Rarity.UNCOMMON,
-            text="Destroy an enemy creature.",
+            text="Destroy an enemy hero.",
             effect=Effect.DESTROY_TARGET, needs_target=True),
 
     # -- relics ----------------------------------------------------------

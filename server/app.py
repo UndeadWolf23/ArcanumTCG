@@ -73,6 +73,7 @@ class Connection:
         # in-match intents
         if mtype in (MsgType.INTENT_PLAY_CARD.value, MsgType.INTENT_ATTACK.value,
                      MsgType.INTENT_PASS_PRIORITY.value,
+                     MsgType.INTENT_ACTIVATE.value,
                      MsgType.INTENT_CONCEDE.value):
             if self.session is None or self.session.closed:
                 await self.send(logic.make_error(
@@ -83,6 +84,27 @@ class Connection:
         reply = logic.handle_envelope(env, len(CONNECTED))
         if reply is not None:
             await self.send(reply.encode())
+
+
+async def _card_library_loop() -> None:
+    """Keep the official card library loaded so player decks that contain
+    published cards validate and build into real piles."""
+    from arcanum.services import cards as card_library
+    while True:
+        try:
+            done = asyncio.Event()
+            result = {}
+            card_library.refresh(lambda n, err:
+                                 (result.update(n=n, err=err), done.set()))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=20)
+                log.info("Card library: %s cards (%s)",
+                         result.get("n"), result.get("err") or "ok")
+            except asyncio.TimeoutError:
+                log.warning("Card library refresh timed out.")
+        except Exception:  # noqa: BLE001
+            log.exception("Card library refresh crashed")
+        await asyncio.sleep(3600)
 
 
 async def handler(websocket):
@@ -130,6 +152,7 @@ async def main() -> None:
             loop.add_signal_handler(sig, lambda: stop.done() or stop.set_result(None))
         except NotImplementedError:
             pass
+    asyncio.get_running_loop().create_task(_card_library_loop())
     async with websockets.serve(handler, "0.0.0.0", port,
                                 process_request=health_check,
                                 ping_interval=20, ping_timeout=20,

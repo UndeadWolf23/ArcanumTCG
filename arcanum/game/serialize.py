@@ -65,6 +65,7 @@ def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:
             "champion": card_to_dict(player.champion) if player.champion else None,
             "board": [card_to_dict(c) for c in player.board],
             "relics": [card_to_dict(c) for c in player.relics],
+            "barriers": [card_to_dict(c) for c in player.barriers],
         }
         if full_hand:
             data["hand"] = [card_to_dict(c) for c in player.hand]
@@ -124,6 +125,7 @@ def apply_snapshot(mirror: MatchState, snap: dict[str, Any]) -> None:
                 _update_card(player.champion, champ_data)
         _sync_list(player.board, data.get("board", []), pool)
         _sync_list(player.relics, data.get("relics", []), pool)
+        _sync_list(player.barriers, data.get("barriers", []), pool)
         if player is you:
             _sync_list(player.hand, data.get("hand", []), pool)
     # opponent hand stays empty in the mirror; the count travels separately
