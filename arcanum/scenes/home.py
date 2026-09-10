@@ -19,7 +19,7 @@ from arcanum.ui import theme
 from arcanum.ui.animation import approach
 from arcanum.ui.widgets import Button, LinkButton, apply_cursor
 
-NAV_ITEMS = ("Home", "Profile", "Decks", "Packs", "Store", "Mastery")
+NAV_ITEMS = ("Home", "Social", "Decks", "Packs", "Store", "Mastery")
 
 SLIDES = (
     {"title": "Welcome to Arcanum",
@@ -217,6 +217,9 @@ class HomeScene(Scene):
         label = NAV_ITEMS[index]
         if label == "Decks":
             self._open_decks()
+        elif label == "Social":
+            from arcanum.scenes.social import SocialScene
+            self.app.scenes.push(SocialScene(self.app))
         elif label == "Packs":
             from arcanum.scenes.packs import PacksScene
             self.app.scenes.push(PacksScene(self.app))
@@ -256,8 +259,17 @@ class HomeScene(Scene):
                     action()
                     return
 
+    def _watch_challenges(self) -> None:
+        count = len(self.app.backend.challenges)
+        if count > getattr(self, "_seen_challenges", 0):
+            newest = self.app.backend.challenges[-1].get("from", "Someone")
+            self._show_toast(f"{newest} challenges you! Open Social to "
+                             "answer.")
+        self._seen_challenges = count
+
     def update(self, dt: float) -> None:
         self._time += dt
+        self._watch_challenges()
         self._toast_timer = max(0.0, self._toast_timer - dt)
         self._slide_timer += dt
         if self._slide_timer > 7.0:
@@ -442,7 +454,7 @@ class HomeScene(Scene):
             surface.blit(logo, logo.get_rect(center=avatar))
         theme.aa_circle(surface, theme.GOLD_DIM, avatar, int(30 * s), width=2)
         user = self.app.backend.session.user
-        name = (user.username if user else "You") + \
+        name = self.app.backend.display_name + \
             ("  ·  temp" if user and user.is_guest else "")
         theme.draw_text(surface, name, (int(104 * s), h - int(84 * s)),
                         theme.body_font(int(18 * s), bold=True), theme.TEXT,

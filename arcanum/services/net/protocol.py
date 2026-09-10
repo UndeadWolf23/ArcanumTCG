@@ -47,6 +47,16 @@ class MsgType(str, Enum):
     INTENT_MULLIGAN = "intent.mulligan"
     INTENT_CONCEDE = "intent.concede"
 
+    # social / friends
+    PRESENCE_QUERY = "social.presence.query"
+    PRESENCE_STATE = "social.presence.state"
+    CHALLENGE_SEND = "social.challenge.send"
+    CHALLENGE_INCOMING = "social.challenge.incoming"
+    CHALLENGE_ACCEPT = "social.challenge.accept"
+    CHALLENGE_DECLINE = "social.challenge.decline"
+    CHALLENGE_CANCEL = "social.challenge.cancel"
+    CHALLENGE_RESULT = "social.challenge.result"
+
     # -- in-match: server events (authoritative results)
     EVENT_GAME_STATE = "event.game_state"      # full snapshot (join/reconnect)
     EVENT_STATE_DELTA = "event.state_delta"    # incremental update

@@ -24,6 +24,7 @@ Handler = Callable[..., None]
 
 class Events:
     """Central registry of event names (avoids typo'd string literals)."""
+    PROFILE_READY = "profile.ready"
 
     # App lifecycle
     APP_QUIT = "app.quit"

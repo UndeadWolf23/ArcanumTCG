@@ -77,7 +77,7 @@ class AuthService(ABC):
     # ------------------------------------------------------------------
     @staticmethod
     def guest_user() -> User:
-        """Temporary account used by the dev 'Bypass' button."""
+        """Temporary local account (offline fallback; no UI entry point)."""
         return User(id="guest-dev", username="Playtester", email="", is_guest=True)
 
 

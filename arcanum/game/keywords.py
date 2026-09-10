@@ -54,16 +54,19 @@ def _hero(id_, name, text, has_value=False, charge="", implemented=False):
                       implemented)
 
 
-def _champ(id_, name, text, has_value=False, charge=""):
-    return KeywordDef(id_, name, CardType.CHAMPION, text, has_value, charge)
+def _champ(id_, name, text, has_value=False, charge="", implemented=False):
+    return KeywordDef(id_, name, CardType.CHAMPION, text, has_value, charge,
+                      implemented)
 
 
-def _relic(id_, name, text, has_value=False, charge=""):
-    return KeywordDef(id_, name, CardType.RELIC, text, has_value, charge)
+def _relic(id_, name, text, has_value=False, charge="", implemented=False):
+    return KeywordDef(id_, name, CardType.RELIC, text, has_value, charge,
+                      implemented)
 
 
-def _barrier(id_, name, text, has_value=False, charge=""):
-    return KeywordDef(id_, name, CardType.BARRIER, text, has_value, charge)
+def _barrier(id_, name, text, has_value=False, charge="", implemented=False):
+    return KeywordDef(id_, name, CardType.BARRIER, text, has_value, charge,
+                      implemented)
 
 
 KEYWORDS: tuple[KeywordDef, ...] = (
@@ -117,7 +120,7 @@ KEYWORDS: tuple[KeywordDef, ...] = (
           "Astral charges, transform it.", has_value=True, charge="astral"),
     _hero("starlight", "Starlight",
           "This hero gets +1/+1 for each permanent you control with an "
-          "Astral counter."),
+          "Astral counter.", implemented=True),
     _hero("devotion", "Devotion",
           "This hero gets +1/+1 for each point of life your champion has "
           "above their starting life."),
@@ -148,22 +151,23 @@ KEYWORDS: tuple[KeywordDef, ...] = (
           "turn."),
     _hero("resonate", "Resonate",
           "Whenever this hero gains any charge, another target hero you "
-          "control gains a charge of a kind it already has."),
-    _hero("banner", "Banner", "Minions you control have +1/+0."),
+          "control gains a charge of a kind it already has.", implemented=True),
+    _hero("banner", "Banner", "Minions you control have +1/+0.", implemented=True),
     _hero("pack", "Pack {x}",
           "All other heroes you control that share a type with this hero "
           "get +{x}/+{x}.", has_value=True),
     _hero("consume", "Consume",
           "Destroy a friendly minion: this hero gains +2/+2 until end of "
-          "turn."),
+          "turn.", implemented=True),
     _hero("purify", "Purify",
-          "Remove a charge from a friendly hero: heal that hero for 2."),
+          "Remove a charge from a friendly hero: heal that hero for 2.", implemented=True),
     _hero("rage", "Rage",
           "Whenever your champion takes damage, this hero gains +1/+1."),
     _hero("umbral", "Umbral",
-          "This hero can only be attacked or blocked by heroes with Umbral."),
+          "This hero can only be blocked by heroes with Umbral or Veil "
+          "Pierce.", implemented=True),
     _hero("veil_pierce", "Veil Pierce",
-          "This hero can attack and block Umbral heroes."),
+          "This hero can block Umbral heroes.", implemented=True),
     _hero("relicbound_hero", "Relicbound",
           "While you control this hero, your relics with Relicbound cannot "
           "be destroyed."),
@@ -171,27 +175,27 @@ KEYWORDS: tuple[KeywordDef, ...] = (
     # ------------------------------------------------------------ champion
     _champ("rebirth", "Rebirth",
            "The first time your champion would be defeated, restore it to "
-           "10 life instead."),
+           "10 life instead.", implemented=True),
     _champ("sacrifice", "Sacrifice",
            "Once per turn, you may sacrifice a minion to activate this "
            "champion's Sacrifice ability."),
     _champ("command", "Command",
-           "Your minions get +1/+1 while this champion is in play."),
+           "Your minions get +1/+1 while this champion is in play.", implemented=True),
     _champ("inspire", "Inspire",
            "Whenever a hero you control attacks, another hero you control "
-           "gets +1/+0 until end of turn."),
+           "gets +1/+0 until end of turn.", implemented=True),
     _champ("rally", "Rally",
-           "Whenever you create your second minion each turn, draw a card."),
+           "Whenever you create your second minion each turn, draw a card.", implemented=True),
     _champ("ascendant", "Ascendant",
            "Whenever one of your heroes transforms, your champion gains 2 "
-           "life and 1 energy."),
+           "life and 1 energy.", implemented=True),
     _champ("blood_oath", "Blood Oath",
            "Whenever your champion loses life, put a Blood charge on it. At "
            "5 Blood charges, trigger its Blood Oath ability.",
-           charge="blood"),
+           charge="blood", implemented=True),
     _champ("treasury", "Treasury",
            "At the beginning of your turn, if you have no relics, create an "
-           "Energy Potion relic."),
+           "Energy Potion relic.", implemented=True),
 
     # ------------------------------------------------------------ relic
     _relic("empower", "Empower",
@@ -210,7 +214,7 @@ KEYWORDS: tuple[KeywordDef, ...] = (
            "gains a charge, trigger this relic's Attune ability."),
     _relic("hoard", "Hoard",
            "Whenever you gain extra energy, put a Hoard charge on this "
-           "relic. Remove 5: gain 3 energy.", charge="hoard"),
+           "relic. Remove 5: gain 3 energy.", charge="hoard", implemented=True),
     _relic("ritual", "Ritual {x}",
            "At the beginning of your end step, if you met this relic's "
            "condition this turn, put a Ritual charge on it. At {x} charges, "
@@ -247,13 +251,13 @@ KEYWORDS: tuple[KeywordDef, ...] = (
              "Barrier.", has_value=True),
     _barrier("sanctuary", "Sanctuary",
              "Heroes protected by this Barrier cannot be targeted by "
-             "opposing abilities."),
+             "opposing abilities.", implemented=True),
     _barrier("aegis", "Aegis",
              "The first time each turn a protected hero would be destroyed, "
-             "prevent it and destroy this Barrier instead."),
+             "prevent it and destroy this Barrier instead.", implemented=True),
     _barrier("barrierlink", "Barrierlink",
              "When another Barrier you control is destroyed, move all of its "
-             "remaining charges onto this Barrier."),
+             "remaining charges onto this Barrier.", implemented=True),
     _barrier("last_wall", "Last Wall",
              "When this Barrier is destroyed, your champion cannot take "
              "damage until the beginning of your next turn."),
@@ -290,3 +294,37 @@ HERO_TYPES: tuple[str, ...] = (
     "Human", "Dog", "Cat", "Wolf", "Dragon", "Demon", "Angel", "Vampire",
     "Werewolf", "Zombie", "Ghost", "Golem", "Robot", "Alien",
 )
+
+
+# ---------------------------------------------------------------------------
+# Single source of truth for engine support. Set at import so inline flags
+# can never drift from what the match engine actually executes.
+# ---------------------------------------------------------------------------
+ENGINE_IMPLEMENTED = {
+    # combat core
+    "rush", "quick", "lethal", "pierce", "crush", "execute", "thorns",
+    "soul_link", "feast", "undying", "umbral", "veil_pierce",
+    # triggers, charges, statics
+    "ascension", "astral", "greed", "surge", "reservoir", "rage",
+    "lifebound", "harvest", "last_stand", "bloodthirst", "devotion",
+    "starlight", "banner", "resonate", "intelligent", "charged",
+    "reanimate",
+    # activated abilities
+    "channel", "discharge", "tribute", "consume", "purify",
+    # champion passives
+    "inspire", "treasury", "blood_oath", "rebirth", "command", "rally",
+    "ascendant",
+    # relics
+    "hoard", "fortune", "countdown", "empower", "salvage", "conduit",
+    "offering", "relicbound_relic", "relicbound_hero",
+    # barriers
+    "ward", "reflect", "regenerate", "last_wall", "sanctuary", "aegis",
+    "barrierlink",
+}
+
+for _def in KEYWORDS:
+    try:
+        _def.implemented = _def.id in ENGINE_IMPLEMENTED
+    except AttributeError:                       # frozen dataclass
+        object.__setattr__(_def, "implemented",
+                           _def.id in ENGINE_IMPLEMENTED)

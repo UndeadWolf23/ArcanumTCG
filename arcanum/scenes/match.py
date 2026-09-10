@@ -31,6 +31,8 @@ from arcanum.game.controller import (LocalController, MatchController,
                                      RemoteController)
 from arcanum.game.match import MAX_MANA, CardInstance, Kind, Phase
 from arcanum.game.serialize import card_from_dict
+from arcanum.services import cardimages
+from arcanum.services import cards as card_library
 from arcanum.ui import theme
 from arcanum.ui.animation import Tween, approach, ease_out_back, ease_out_cubic
 from arcanum.ui.widgets import Button, LinkButton, apply_cursor
@@ -216,6 +218,11 @@ class MatchScene(Scene):
         self.pending_spell: Optional[CardSprite] = None    # staged, awaiting target
         self.attack_source: Optional[CardSprite] = None    # combat arrow origin
         self.pending_ability: Optional[tuple[int, str]] = None
+        self._void_open = False
+        self._void_rects: list[tuple[int, pygame.Rect]] = []
+        self._auto_key = None          # (turn, phase) already auto-checked
+        self._auto_timer = 0.0
+        self._pulse_end_turn = 0.0
         self._target_uid: Optional[int] = None
         self._pinned: Optional[tuple[CardInstance, pygame.Rect]] = None
         self._guard_flash = 0.0            # opp creatures flash: champion guarded
@@ -280,6 +287,10 @@ class MatchScene(Scene):
         self.barrier_anchor = (int(w * 0.19), int(h * 0.585))
         self.opp_barrier_anchor = (int(w * 0.19), int(h * 0.295))
         self.barrier_size = (int(74 * s), int(103 * s))
+        self.void_chip = pygame.Rect(w - int(150 * s), h - int(210 * s),
+                                     int(120 * s), int(34 * s))
+        self.opp_void_chip = pygame.Rect(int(24 * s), int(96 * s),
+                                         int(120 * s), int(30 * s))
         self.stage_pos = (w // 2, int(h * 0.62))             # staged spell hover
 
         self.hand_y = h - int(self.card_size[1] * 0.52)
@@ -339,6 +350,9 @@ class MatchScene(Scene):
     def _pump_controller(self, dt: float) -> None:
         self.controller.update(dt)
         self._rebind_sprites()
+        self._auto_advance(dt)
+        self._pulse_end_turn = max(0.0, getattr(self, "_pulse_end_turn", 0)
+                                   - dt)
         for event in self.controller.poll_events():
             try:
                 self._on_controller_event(event)
@@ -354,7 +368,19 @@ class MatchScene(Scene):
         "lifebound": (140, 240, 160), "channel": (120, 220, 255),
         "discharge": (90, 200, 255), "tribute": (255, 215, 120),
         "harvest": (170, 240, 140), "last_stand": (220, 220, 240),
-        "transform": (255, 210, 80),
+        "transform": (255, 210, 80), "inspire": (255, 225, 140),
+        "treasury": (255, 215, 120), "blood_oath": (220, 60, 60),
+        "rebirth": (255, 240, 180), "ascendant": (230, 190, 255),
+        "rally": (150, 220, 255), "consume": (200, 90, 160),
+        "purify": (170, 240, 200), "resonate": (180, 170, 255),
+        "hoard": (255, 200, 90), "aegis": (160, 210, 255),
+        "barrierlink": (140, 190, 255), "ward": (150, 200, 255),
+        "reflect": (255, 170, 110), "last_wall": (200, 220, 255),
+        "reanimate": (170, 140, 255), "intelligent": (140, 200, 255),
+        "fortune": (255, 220, 130), "countdown": (255, 130, 90),
+        "empower": (255, 190, 110), "salvage": (170, 220, 170),
+        "conduit": (150, 190, 255), "offering": (220, 150, 200),
+        "relicbound": (200, 200, 220),
     }
 
     def _on_keyword_event(self, event: dict) -> None:
@@ -544,23 +570,44 @@ class MatchScene(Scene):
             self.effects.append(sprite)
             self._schedule(0.55, sprite.start_die)
 
-    def _ability_for(self, sprite: CardSprite) -> Optional[str]:
-        """Which activated ability this OWN card offers right now (client
-        mirror of MatchState.available_abilities; server still authoritative)."""
-        state = self.controller.state
-        if state.active != 0 or state.phase is not Phase.MAIN \
-                or self._flow_busy:
+    def _card_face(self, card, size: tuple[int, int]):
+        """The card's real published artwork scaled to the sprite, cached.
+        None when the card has no image (or it hasn't downloaded yet)."""
+        if not card.card_id:
             return None
-        card = sprite.card
-        if sprite in self.board:
-            if card.has_kw("channel") and not card.exhausted and not card.sick:
-                return "channel"
-            if card.has_kw("discharge") and \
-                    card.charges.get("lightning", 0) > 0:
-                return "discharge"
-        if sprite in self.relics and card.has_kw("tribute"):
-            return "tribute"
-        return None
+        name = card_library.image_name(card.card_id)
+        if not name:
+            return None
+        cache = getattr(self, "_face_cache", None)
+        if cache is None:
+            cache = self._face_cache = {}
+        key = (name, size)
+        if key in cache:
+            return cache[key]
+        path = cardimages.get_path(name)
+        face = None
+        if path is not None:
+            try:
+                raw = pygame.image.load(str(path)).convert_alpha()
+                if cardimages.plausible_card_image(raw.get_width(),
+                                                   raw.get_height()):
+                    face = pygame.transform.smoothscale(raw, size)
+            except (pygame.error, ValueError):
+                face = None
+        if face is not None or path is not None:
+            cache[key] = face        # don't cache misses still downloading
+        return face
+
+    def _ability_for(self, sprite: CardSprite) -> Optional[str]:
+        """First activatable ability on this OWN card, straight from the
+        engine mirror (server remains authoritative on activation)."""
+        if self._flow_busy:
+            return None
+        if sprite not in self.board and sprite not in self.relics:
+            return None
+        abilities = self.controller.state.available_abilities(
+            0, sprite.card.uid)
+        return abilities[0] if abilities else None
 
     def _ability_gem_rect(self, sprite: CardSprite) -> pygame.Rect:
         size = self.board_card_size if sprite in self.board \
@@ -577,6 +624,38 @@ class MatchScene(Scene):
             if ability and self._ability_gem_rect(sprite).collidepoint(pos):
                 return sprite.card.uid, ability
         return None
+
+    def _auto_advance(self, dt: float) -> None:
+        """Smart phase skipping: when it's your MAIN and the engine confirms
+        you have zero legal actions (no playable card — including target
+        availability — and no activatable ability), advance to combat for
+        you. In COMBAT with zero legal attacks the End Turn button pulses
+        instead — ending the turn stays a deliberate click. The check runs
+        against the authoritative mirror once per phase, after a short grace
+        so animations and incoming events settle."""
+        state = self.controller.state
+        if state.winner is not None or state.active != 0:
+            self._auto_key = None
+            return
+        if self.drag is not None or self.pending_spell is not None \
+                or self.attack_source is not None \
+                or self.pending_ability is not None or self._flow_busy:
+            self._auto_timer = 0.0
+            return
+        key = (state.turn_number, state.phase)
+        if key == self._auto_key:
+            return
+        self._auto_timer += dt
+        if self._auto_timer < 0.8:
+            return
+        self._auto_timer = 0.0
+        self._auto_key = key
+        if state.phase is Phase.MAIN and not state.has_main_actions(0):
+            self._show_toast("No actions available — to combat.")
+            self.controller.pass_phase()
+        elif state.phase is Phase.COMBAT and not state.has_combat_actions(0):
+            self._show_toast("No attacks available.")
+            self._pulse_end_turn = 2.5
 
     def _rebind_sprites(self) -> None:
         """Point every sprite at the controller's live card instance so
@@ -839,11 +918,34 @@ class MatchScene(Scene):
                 self._cancel_stage()
             return
 
+        if self._void_open:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self._void_open = False
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                for uid, rect in self._void_rects:
+                    if rect.collidepoint(event.pos):
+                        ok, _why = self.controller.state.can_play(0, uid)
+                        if ok:
+                            self._void_open = False
+                            self.controller.play_card(uid)
+                        return
+                self._void_open = False
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                and self.void_chip.collidepoint(event.pos) \
+                and self.controller.state.player(0).void:
+            self._void_open = True
+            return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
                 and self.pending_ability is not None:
             uid, ability = self.pending_ability
-            for sprite in self.opp_board:
-                if sprite.rect(self.board_card_size).collidepoint(event.pos):
+            legal = {c.uid for c in
+                     self.controller.state.valid_ability_targets(0, uid,
+                                                                 ability)}
+            for sprite in (*self.opp_board, *self.board):
+                if sprite.card.uid in legal and \
+                        sprite.rect(self.board_card_size).collidepoint(
+                            event.pos):
                     self.pending_ability = None
                     self.controller.activate(uid, ability, sprite.card.uid)
                     return
@@ -853,9 +955,13 @@ class MatchScene(Scene):
             gem = self._ability_gem_hit(event.pos)
             if gem is not None:
                 uid, ability = gem
-                if ability == "discharge":
+                from arcanum.game.match import MatchState
+                if ability in MatchState.ABILITY_TARGETS:
                     self.pending_ability = (uid, ability)
-                    self._show_toast("Choose an enemy hero to strike.")
+                    hints = {"discharge": "Choose an enemy hero to strike.",
+                             "consume": "Choose a friendly minion to consume.",
+                             "purify": "Choose a charged friendly hero."}
+                    self._show_toast(hints.get(ability, "Choose a target."))
                 else:
                     self.controller.activate(uid, ability)
                 return
@@ -875,9 +981,11 @@ class MatchScene(Scene):
                 elif self.match.phase is Phase.MAIN:
                     self._show_toast("Heroes attack during your combat phase.")
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
-            sprite = self._field_sprite_under(event.pos)
+            sprite = self._field_sprite_under(event.pos) \
+                or self._hand_sprite_under(event.pos)
             if sprite is not None:
-                self._pinned = (sprite.card, sprite.rect(self._sprite_size(sprite)))
+                self._pinned = (sprite.card,
+                                sprite.rect(self._sprite_size(sprite)))
         elif event.type == pygame.MOUSEMOTION:
             if self.drag is not None:
                 self.drag.x = event.pos[0] + self._drag_dx
@@ -927,6 +1035,7 @@ class MatchScene(Scene):
         busy_pointer = (self.drag is not None or self.pending_spell is not None
                         or self.attack_source is not None)
         hand_hover = self._hand_sprite_under(mouse) if not busy_pointer else None
+        self._hand_hover = hand_hover
         self._field_hover = (self._field_sprite_under(mouse)
                              if not busy_pointer else None)
 
@@ -1053,11 +1162,16 @@ class MatchScene(Scene):
             self._draw_card(surface, self.pending_spell, self.card_size)
 
         self._draw_arrows(surface)
+        if getattr(self, "_pulse_end_turn", 0) > 0:
+            pulse = 0.35 + 0.35 * abs(math.sin(self._time * 4))
+            theme.draw_glow_rect(surface, self.btn_turn.rect,
+                                 theme.GOLD_GLOW, pulse, radius=12, spread=12)
         for widget in self.widgets:
             widget.draw(surface)
         self._draw_card_overlays(surface)
         self._draw_floats(surface)
         self._draw_preview(surface)
+        self._draw_void(surface)
         self._draw_toast(surface)
         if self._confirm_leave:
             dw, dh = surface.get_size()
@@ -1187,15 +1301,25 @@ class MatchScene(Scene):
                         compact: bool, hover: bool) -> None:
         card = sprite.card
         is_champ = card.kind is Kind.CHAMPION
-        border = (theme.GOLD if (is_champ or playable or hover or targeted)
-                  else theme.NAVY_EDGE)
-        theme.draw_panel(surface, rect, fill=theme.NAVY_RAISED, border=border,
-                         radius=10)
-        if is_champ:
-            pygame.draw.rect(surface, theme.GOLD_DIM, rect.inflate(-6, -6),
-                             width=1, border_radius=8)
         s = rect.width / 118
-        if not is_champ:
+        face = self._card_face(card, rect.size)
+        if face is not None:
+            surface.blit(face, rect.topleft)
+            border = (theme.GOLD if (playable or hover or targeted)
+                      else None)
+            if border:
+                pygame.draw.rect(surface, border, rect, width=2,
+                                 border_radius=int(8 * s))
+        else:
+            border = (theme.GOLD if (is_champ or playable or hover
+                                     or targeted) else theme.NAVY_EDGE)
+            theme.draw_panel(surface, rect, fill=theme.NAVY_RAISED,
+                             border=border, radius=10)
+            if is_champ:
+                pygame.draw.rect(surface, theme.GOLD_DIM,
+                                 rect.inflate(-6, -6), width=1,
+                                 border_radius=8)
+        if face is None and not is_champ:
             gem_r = int(14 * s)
             gem_c = (rect.x + gem_r + int(5 * s), rect.y + gem_r + int(5 * s))
             pygame.draw.circle(surface, MANA_FILL, gem_c, gem_r)
@@ -1203,32 +1327,51 @@ class MatchScene(Scene):
             theme.draw_text(surface, str(card.cost), gem_c,
                             theme.body_font(max(10, int(15 * s)), bold=True),
                             theme.TEXT, anchor="center")
-        theme.draw_text(surface, card.name if not compact else card.name.split()[0],
-                        (rect.centerx + int(6 * s), rect.y + int(12 * s)),
-                        theme.body_font(max(9, int(11 * s))), theme.TEXT_DIM,
-                        anchor="midtop")
-        art = pygame.Rect(rect.x + int(9 * s), rect.y + int(30 * s),
-                          rect.width - int(18 * s), int(58 * s))
-        theme.draw_panel(surface, art, fill=theme.NAVY, border=theme.NAVY_EDGE,
-                         radius=6)
-        cx, cy = art.centerx, art.centery
-        for angle in range(0, 360, 45):
-            end = (cx + int(13 * s * math.cos(math.radians(angle))),
-                   cy + int(13 * s * math.sin(math.radians(angle))))
-            pygame.draw.line(surface, theme.GOLD_DIM, (cx, cy), end)
-
+        if face is None:
+            theme.draw_text(surface,
+                            card.name if not compact
+                            else card.name.split()[0],
+                            (rect.centerx + int(6 * s), rect.y + int(12 * s)),
+                            theme.body_font(max(9, int(11 * s))),
+                            theme.TEXT_DIM, anchor="midtop")
+            art = pygame.Rect(rect.x + int(9 * s), rect.y + int(30 * s),
+                              rect.width - int(18 * s), int(58 * s))
+            theme.draw_panel(surface, art, fill=theme.NAVY,
+                             border=theme.NAVY_EDGE, radius=6)
+            cx, cy = art.centerx, art.centery
+            for angle in range(0, 360, 45):
+                end = (cx + int(13 * s * math.cos(math.radians(angle))),
+                       cy + int(13 * s * math.sin(math.radians(angle))))
+                pygame.draw.line(surface, theme.GOLD_DIM, (cx, cy), end)
         if card.kind is Kind.CREATURE and card.sick and not sprite.dying:
             self._draw_summon_swirl(surface, rect)
+        if card.kind is Kind.BARRIER:
+            badge_color = HEALTH_RED if card.damaged else (120, 190, 255)
+            theme.draw_text(surface, f"⛨ {max(0, card.health)}",
+                            (rect.centerx, rect.bottom - int(12 * self.ui_scale)),
+                            theme.body_font(int(15 * self.ui_scale), bold=True),
+                            badge_color, anchor="center")
         if card.kind is Kind.CREATURE:
-            theme.draw_text(surface, str(card.attack),
-                            (rect.x + int(13 * s), rect.bottom - int(14 * s)),
-                            theme.body_font(max(10, int(16 * s)), bold=True),
-                            theme.GOLD_BRIGHT, anchor="center")
-            health_color = HEALTH_RED if card.damaged else theme.SUCCESS
-            theme.draw_text(surface, str(max(0, card.health)),
-                            (rect.right - int(13 * s), rect.bottom - int(14 * s)),
-                            theme.body_font(max(10, int(16 * s)), bold=True),
-                            health_color, anchor="center")
+            shown_attack = card.attack + card.temp_attack
+            owner = 0 if (sprite in self.board or sprite in self.hand
+                          or sprite is self.pending_spell) else 1
+            try:
+                shown_attack = self.controller.state.effective_attack(
+                    card, owner)
+            except Exception:  # noqa: BLE001 - display must never crash
+                pass
+            boosted = shown_attack > card.attack
+            chip_font = theme.body_font(max(10, int(16 * s)), bold=True)
+            for value, corner, color in (
+                    (shown_attack, (rect.x + int(13 * s),
+                                    rect.bottom - int(14 * s)),
+                     (255, 235, 140) if boosted else theme.GOLD_BRIGHT),
+                    (max(0, card.health),
+                     (rect.right - int(13 * s), rect.bottom - int(14 * s)),
+                     HEALTH_RED if card.damaged else theme.SUCCESS)):
+                theme.aa_circle(surface, (10, 14, 30), corner, int(12 * s))
+                theme.draw_text(surface, str(value), corner, chip_font,
+                                color, anchor="center")
             if card.exhausted and not sprite.dying:
                 veil = pygame.Surface(rect.size, pygame.SRCALPHA)
                 pygame.draw.rect(veil, (8, 12, 26, 120), veil.get_rect(),
@@ -1287,8 +1430,13 @@ class MatchScene(Scene):
     def _draw_card_overlays(self, surface: pygame.Surface) -> None:
         """Charge pips, keyword initials, and activation gems on board cards."""
         s = self.ui_scale
-        for owner, group in ((0, self.board), (1, self.opp_board)):
-            size = self.board_card_size
+        for owner, group, size in (
+                (0, self.board, self.board_card_size),
+                (1, self.opp_board, self.board_card_size),
+                (0, self.relics, self.relic_size),
+                (1, self.opp_relics, self.relic_size),
+                (0, self.barriers, self.barrier_size),
+                (1, self.opp_barriers, self.barrier_size)):
             for sprite in group:
                 rect = sprite.rect(size)
                 card = sprite.card
@@ -1325,13 +1473,25 @@ class MatchScene(Scene):
                             gem.width // 2)
             theme.aa_circle(surface, theme.GOLD_BRIGHT, gem.center,
                             gem.width // 2, width=2)
-            symbol = {"channel": "+", "discharge": "⚡",
-                      "tribute": "✦"}.get(ability, "!")
+            symbol = {"channel": "+", "discharge": "⚡", "tribute": "✦",
+                      "consume": "◆", "purify": "✚"}.get(ability, "!")
             theme.draw_text(surface, symbol, gem.center,
                             theme.body_font(int(14 * self.ui_scale),
                                             bold=True),
                             theme.TEXT_ON_GOLD, anchor="center")
-        # discharge targeting arrow
+        if self.pending_ability is not None:
+            uid, ability = self.pending_ability
+            legal = {c.uid for c in
+                     self.controller.state.valid_ability_targets(0, uid,
+                                                                 ability)}
+            pulse = 0.4 + 0.3 * abs(math.sin(self._time * 3.4))
+            for sprite in (*self.opp_board, *self.board):
+                if sprite.card.uid in legal:
+                    theme.draw_glow_rect(surface,
+                                         sprite.rect(self.board_card_size),
+                                         (90, 200, 255), pulse, radius=10,
+                                         spread=8)
+        # ability targeting arrow
         if self.pending_ability is not None:
             uid, _ability = self.pending_ability
             sprite = self._sprite_for(0, uid)
@@ -1356,21 +1516,62 @@ class MatchScene(Scene):
             sprite = self._field_hover
             card = sprite.card
             anchor = sprite.rect(self._sprite_size(sprite))
+        elif getattr(self, "_hand_hover", None) is not None:
+            sprite = self._hand_hover
+            card = sprite.card
+            anchor = sprite.rect(self.card_size)
         else:
             return
         w, h = surface.get_size()
-        pw, ph = int(230 * self.ui_scale), int(322 * self.ui_scale)
+        s = self.ui_scale
+        pad = int(16 * s)
+        pw = int(250 * s)
+        max_h = h - 24
+
+        # wrap the FULL rules text, stepping the font down until everything
+        # (header + art + text + stats) fits the tallest allowed panel
+        def wrap(font):
+            lines, line = [], ""
+            for word in card.text.split():
+                probe = f"{line} {word}".strip()
+                if font.size(probe)[0] > pw - pad * 2 and line:
+                    lines.append(line)
+                    line = word
+                else:
+                    line = probe
+            if line:
+                lines.append(line)
+            return lines
+
+        font_size = int(14 * s)
+        art_h = int(104 * s)
+        header_h = int(64 * s)
+        stats_h = int(30 * s)
+        while True:
+            font = theme.body_font(font_size)
+            lines = wrap(font)
+            text_h = len(lines) * font.get_linesize()
+            ph = pad + header_h + art_h + int(12 * s) + text_h + stats_h + pad
+            if ph <= max_h or (font_size <= 11 and art_h <= int(40 * s)):
+                break
+            if art_h > int(40 * s):
+                art_h -= int(16 * s)
+            else:
+                font_size -= 1
+        ph = min(ph, max_h)
+
         x = anchor.right + 18
         if x + pw > w - 12:
             x = anchor.x - pw - 18
+        x = max(12, min(x, w - pw - 12))
         y = max(12, min(anchor.centery - ph // 2, h - ph - 12))
         rect = pygame.Rect(x, y, pw, ph)
-        theme.draw_glow_rect(surface, rect, theme.GOLD, 0.4, radius=12, spread=10)
-        theme.draw_panel(surface, rect, fill=theme.NAVY, border=theme.GOLD_DIM,
-                         radius=12)
-        pad = int(16 * self.ui_scale)
+        theme.draw_glow_rect(surface, rect, theme.GOLD, 0.4, radius=12,
+                             spread=10)
+        theme.draw_panel(surface, rect, fill=theme.NAVY,
+                         border=theme.GOLD_DIM, radius=12)
         theme.draw_text(surface, card.name, (rect.centerx, rect.y + pad),
-                        theme.display_font(int(20 * self.ui_scale)),
+                        theme.display_font(int(19 * s)),
                         theme.GOLD_BRIGHT, anchor="midtop")
         subtitle = KIND_LABELS[card.kind]
         if card.kind is not Kind.CHAMPION:
@@ -1380,30 +1581,29 @@ class MatchScene(Scene):
         if card.kind is Kind.CREATURE and card.sick:
             subtitle += "  ·  summoning"
         theme.draw_text(surface, subtitle,
-                        (rect.centerx, rect.y + pad + int(28 * self.ui_scale)),
-                        theme.body_font(int(13 * self.ui_scale)),
-                        theme.TEXT_DIM, anchor="midtop")
-        art = pygame.Rect(rect.x + pad, rect.y + int(72 * self.ui_scale),
-                          rect.width - pad * 2, int(110 * self.ui_scale))
-        theme.draw_panel(surface, art, fill=theme.NAVY_RAISED,
-                         border=theme.NAVY_EDGE, radius=8)
-        for angle in range(0, 360, 30):
-            end = (art.centerx + int(28 * math.cos(math.radians(angle))),
-                   art.centery + int(28 * math.sin(math.radians(angle))))
-            pygame.draw.line(surface, theme.GOLD_DIM, art.center, end)
-        font = theme.body_font(int(14 * self.ui_scale))
-        words, lines, line = card.text.split(), [], ""
-        for word in words:
-            test = f"{line} {word}".strip()
-            if font.size(test)[0] > rect.width - pad * 2 and line:
-                lines.append(line)
-                line = word
+                        (rect.centerx, rect.y + pad + int(26 * s)),
+                        theme.body_font(int(12 * s)), theme.TEXT_DIM,
+                        anchor="midtop")
+        art = pygame.Rect(rect.x + pad, rect.y + header_h + int(6 * s),
+                          rect.width - pad * 2, art_h)
+        if art_h > int(30 * s):
+            face_w = int(art_h * 1065 / 1477)
+            face = self._card_face(card, (face_w, art_h))
+            if face is not None:
+                surface.blit(face, face.get_rect(midtop=art.midtop))
             else:
-                line = test
-        if line:
-            lines.append(line)
-        ty = art.bottom + int(14 * self.ui_scale)
-        for text_line in lines[:4]:
+                theme.draw_panel(surface, art, fill=theme.NAVY_RAISED,
+                                 border=theme.NAVY_EDGE, radius=8)
+                spoke = min(int(28 * s), art_h // 2 - 4)
+                for angle in range(0, 360, 30):
+                    tip = (art.centerx +
+                           int(spoke * math.cos(math.radians(angle))),
+                           art.centery +
+                           int(spoke * math.sin(math.radians(angle))))
+                    pygame.draw.line(surface, theme.GOLD_DIM, art.center,
+                                     tip)
+        ty = art.bottom + int(12 * s)
+        for text_line in lines:
             theme.draw_text(surface, text_line, (rect.centerx, ty), font,
                             theme.TEXT, anchor="midtop")
             ty += font.get_linesize()
@@ -1412,19 +1612,24 @@ class MatchScene(Scene):
             if card.damaged:
                 stats += f"  (of {card.max_health})"
             theme.draw_text(surface, stats, (rect.centerx, rect.bottom - pad),
-                            theme.body_font(int(18 * self.ui_scale), bold=True),
+                            theme.body_font(int(18 * s), bold=True),
                             theme.GOLD_BRIGHT, anchor="midbottom")
+        elif card.kind is Kind.BARRIER:
+            theme.draw_text(surface, f"⛨ {max(0, card.health)} / "
+                                     f"{card.max_health} durability",
+                            (rect.centerx, rect.bottom - pad),
+                            theme.body_font(int(15 * s), bold=True),
+                            (120, 190, 255), anchor="midbottom")
         elif card.kind is Kind.CHAMPION:
             theme.draw_text(surface, f"{max(0, card.health)} Health",
                             (rect.centerx, rect.bottom - pad),
-                            theme.body_font(int(16 * self.ui_scale), bold=True),
+                            theme.body_font(int(16 * s), bold=True),
                             HEALTH_RED, anchor="midbottom")
         if pinned is not None:
             theme.draw_text(surface, "left-click to close",
-                            (rect.centerx, rect.bottom + 8),
-                            theme.body_font(int(11 * self.ui_scale)),
+                            (rect.centerx, min(rect.bottom + 8, h - 14)),
+                            theme.body_font(int(11 * s)),
                             theme.TEXT_FAINT, anchor="midtop")
-
     # -- HUD ---------------------------------------------------------------
     def _draw_opponent(self, surface: pygame.Surface) -> None:
         w = surface.get_width()
@@ -1536,6 +1741,83 @@ class MatchScene(Scene):
                             theme.body_font(15, bold=active),
                             theme.GOLD_BRIGHT if active else theme.TEXT_FAINT,
                             anchor="center")
+
+    def _draw_void(self, surface: pygame.Surface) -> None:
+        s = self.ui_scale
+        state = self.controller.state
+        mine, theirs = state.player(0).void, state.player(1).void
+        for chip, pile, label in ((self.void_chip, mine, "Void"),
+                                  (self.opp_void_chip, theirs, "Enemy void")):
+            if not pile:
+                continue
+            theme.draw_panel(surface, chip, fill=theme.NAVY_RAISED,
+                             border=theme.NAVY_EDGE, radius=9)
+            theme.draw_text(surface, f"{label}  ·  {len(pile)}",
+                            chip.center, theme.body_font(int(12 * s)),
+                            theme.TEXT_DIM, anchor="center")
+        if not self._void_open:
+            return
+        w, h = surface.get_size()
+        veil = pygame.Surface((w, h), pygame.SRCALPHA)
+        veil.fill((*theme.NAVY_ABYSS, 200))
+        surface.blit(veil, (0, 0))
+        theme.draw_text(surface, "The Void",
+                        (w // 2, int(60 * s)),
+                        theme.display_font(int(26 * s)), theme.GOLD_BRIGHT,
+                        anchor="center")
+        theme.draw_text(surface,
+                        "Reanimate heroes glow — click one to return it "
+                        "to battle. Click anywhere else to close.",
+                        (w // 2, int(96 * s)),
+                        theme.body_font(int(13 * s)), theme.TEXT_DIM,
+                        anchor="center")
+        self._void_rects = []
+        size = (int(120 * s), int(168 * s))
+        gap = int(16 * s)
+        cols = max(1, (w - int(120 * s)) // (size[0] + gap))
+        start_x = (w - min(len(mine), cols) * (size[0] + gap) + gap) // 2
+        for i, card in enumerate(mine):
+            col, row = i % cols, i // cols
+            rect = pygame.Rect(start_x + col * (size[0] + gap),
+                               int(140 * s) + row * (size[1] + gap),
+                               size[0], size[1])
+            self._void_rects.append((card.uid, rect))
+            playable, _why = state.can_play(0, card.uid)
+            if card.has_kw("reanimate"):
+                glow = theme.GOLD if playable else theme.NAVY_EDGE
+                theme.draw_glow_rect(surface, rect, glow,
+                                     0.6 if playable else 0.25,
+                                     radius=10, spread=10)
+            face = self._card_face(card, rect.size)
+            if face is not None:
+                surface.blit(face, rect.topleft)
+            else:
+                theme.draw_panel(surface, rect, fill=theme.NAVY,
+                                 border=theme.GOLD_DIM if playable
+                                 else theme.NAVY_EDGE, radius=10)
+                theme.draw_text(surface, card.name,
+                                (rect.centerx, rect.y + int(12 * s)),
+                                theme.body_font(int(12 * s), bold=True),
+                                theme.TEXT, anchor="midtop")
+            if card.has_kw("reanimate"):
+                cost = card.kw_value("reanimate", card.cost)
+                theme.aa_circle(surface, (86, 156, 255),
+                                (rect.x + int(16 * s),
+                                 rect.y + int(16 * s)), int(12 * s))
+                theme.draw_text(surface, str(cost),
+                                (rect.x + int(16 * s), rect.y + int(16 * s)),
+                                theme.body_font(int(13 * s), bold=True),
+                                theme.TEXT, anchor="center")
+                theme.draw_text(surface, "Reanimate",
+                                (rect.centerx, rect.bottom - int(12 * s)),
+                                theme.body_font(int(11 * s)),
+                                theme.GOLD_BRIGHT, anchor="center")
+            theme.draw_text(surface,
+                            f"{card.attack}/{card.max_health}",
+                            (rect.right - int(10 * s),
+                             rect.bottom - int(10 * s)),
+                            theme.body_font(int(13 * s), bold=True),
+                            theme.TEXT_DIM, anchor="bottomright")
 
     def _draw_toast(self, surface: pygame.Surface) -> None:
         if self._toast_timer <= 0 or not self._toast:

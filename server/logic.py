@@ -26,16 +26,17 @@ def wants_websocket(get_header) -> bool:
     return "websocket" in str(upgrade).lower()
 
 
-def parse_hello(raw: str | bytes) -> tuple[str, str]:
+def parse_hello(raw: str | bytes) -> tuple[str, str, str]:
     """Validate the first message. Returns (name, token) or raises ProtocolError."""
     env = Envelope.decode(raw)          # also enforces protocol version
     if env.type != MsgType.HELLO.value:
         raise ProtocolError(f"Expected hello, got {env.type!r}")
     name = str(env.payload.get("name", "")).strip()[:24] or "Adventurer"
+    uid = str(env.payload.get("uid", "")).strip()[:64]
     token = str(env.payload.get("token", ""))
     # Dev mode: any token is accepted. Supabase JWT verification lands here
     # later: decode the JWT, check signature + expiry, extract the user id.
-    return name, token
+    return name, token, uid
 
 
 def make_welcome(name: str, online: int) -> Envelope:

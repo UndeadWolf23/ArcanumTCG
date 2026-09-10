@@ -11,7 +11,7 @@ python main.py
 
 The game opens **borderless at your native desktop resolution** by default. Change screen mode (windowed / borderless / fullscreen) and resolution in **Settings → Graphics**; audio buses in **Settings → Audio**. All settings persist to `data/settings.json`.
 
-On the login screen you can create an account, sign in, use *Forgot password?*, or press **Bypass Login (dev)** to jump straight in with a temp account. *Remember me* keeps you signed in across launches. Accounts are currently stored locally (`data/local_users.json`, PBKDF2-hashed passwords) — this is the offline stand-in for Supabase.
+On the login screen you can create an account, sign in, use *Forgot password?*. *Remember me* keeps you signed in across launches. Accounts are currently stored locally (`data/local_users.json`, PBKDF2-hashed passwords) — this is the offline stand-in for Supabase.
 
 ## Architecture
 
@@ -60,4 +60,3 @@ arcanum/
 3. **Deck builder + Collection scene** backed by `PlayerProfile`.
 4. **Supabase go-live** — implement `SupabaseAuthService`, add `profiles`/`cards`/`decks` tables with row-level security.
 5. **Game server** — implement `WebSocketClient`, stand up matchmaking + match hosting speaking `protocol.py`.
-6. Remove the **Bypass Login** button before any public build.

@@ -105,9 +105,6 @@ class LoginScene(Scene):
             self.widgets.append(self.btn_primary)
             self.widgets.append(LinkButton((cx, py + 296), "New here?  Create an account",
                                            lambda: self._set_mode(SIGN_UP), font_size=16))
-            self.widgets.append(Button(pygame.Rect(px, py + 330, fw, 44),
-                                       "Bypass Login  (dev)", self._bypass,
-                                       primary=False, font_size=16, sound_cb=ui))
         elif self.mode == SIGN_UP:
             self.in_username = add_input(py + 40, "Username")
             self.in_email = add_input(py + 104, "Email")
@@ -165,13 +162,6 @@ class LoginScene(Scene):
         else:
             self._start_busy()
             auth.request_password_reset(self.in_email.text, self._on_result)
-
-    def _bypass(self) -> None:
-        """DEV ONLY — skip auth with a temp account. Remove before release."""
-        user = AuthService.guest_user()
-        self.app.backend.session.begin(user)
-        self.app.bus.publish(Events.AUTH_LOGIN_SUCCESS, user=user)
-        self.app.goto_home()
 
     def _start_busy(self) -> None:
         self.busy = True
@@ -269,6 +259,6 @@ class LoginScene(Scene):
             theme.draw_text(surface, self.notice, (cx, status_y),
                             theme.body_font(15), theme.SUCCESS, anchor="center")
 
-        theme.draw_text(surface, f"v{APP_VERSION}  ·  offline development build",
+        theme.draw_text(surface, f"Arcanum  ·  v{APP_VERSION}",
                         (w - 16, surface.get_height() - 14),
                         theme.body_font(13), theme.TEXT_FAINT, anchor="bottomright")

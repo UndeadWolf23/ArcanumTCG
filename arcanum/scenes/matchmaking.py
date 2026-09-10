@@ -37,7 +37,9 @@ CONNECT_TIMEOUT = 25.0
 
 MODE_TITLES = {"pvp": "Versus — find an opponent",
                "ai": "Duel the Umbral Adept",
-               "practice": "Practice Match (offline)"}
+               "practice": "Practice Match (offline)",
+               "friend": "Challenge a Friend",
+               "friend_accept": "Friendly Match"}
 
 
 def _load_art(name: str):
@@ -51,8 +53,11 @@ def _load_art(name: str):
 
 
 class MatchmakingScene(Scene):
-    def on_enter(self, mode: str = "pvp", **kwargs) -> None:
+    def on_enter(self, mode: str = "pvp", opponent: str = "",
+                 opponent_id: str = "", **kwargs) -> None:
         self.mode = mode
+        self.opponent = opponent
+        self.opponent_id = opponent_id
         self.phase = PICK
         self._time = 0.0
         self.status = ""
@@ -73,7 +78,12 @@ class MatchmakingScene(Scene):
 
     def on_exit(self) -> None:
         if self._awaiting and self._net_state() == "CONNECTED":
-            self.app.backend.net.send(MsgType.QUEUE_LEAVE, {})
+            if self.mode == "friend":
+                self.app.backend.net.send(
+                    MsgType.CHALLENGE_CANCEL,
+                    {"to": self.opponent, "to_id": self.opponent_id})
+            else:
+                self.app.backend.net.send(MsgType.QUEUE_LEAVE, {})
         self.app.bus.unsubscribe(Events.NET_MESSAGE, self._on_net_message)
 
     def on_resize(self, size) -> None:
@@ -127,11 +137,29 @@ class MatchmakingScene(Scene):
     def _join_queue(self) -> None:
         self.phase = SEARCH
         self._awaiting = True
+        deck = dict(self.chosen.cards) if self.chosen else {}
+        if self.mode == "friend":
+            self.status = f"Waiting for {self.opponent}"
+            self.app.backend.net.send(
+                MsgType.CHALLENGE_SEND,
+                {"to": self.opponent, "to_id": self.opponent_id,
+                 "deck": deck})
+            return
+        if self.mode == "friend_accept":
+            self.status = f"Joining {self.opponent}"
+            self.app.backend.net.send(
+                MsgType.CHALLENGE_ACCEPT,
+                {"from": self.opponent, "from_id": self.opponent_id,
+                 "deck": deck})
+            self.app.backend.challenges = [
+                c for c in self.app.backend.challenges
+                if c.get("from") != self.opponent]
+            return
         self.status = ("Searching for an opponent" if self.mode == "pvp"
                        else "Summoning the Umbral Adept")
         payload = {"mode": self.mode,
                    "deck_name": self.chosen.name if self.chosen else "Starter",
-                   "deck": dict(self.chosen.cards) if self.chosen else {}}
+                   "deck": deck}
         self.app.backend.net.send(MsgType.QUEUE_JOIN, payload)
 
     def _start_practice(self) -> None:
@@ -168,6 +196,14 @@ class MatchmakingScene(Scene):
                                           envelope.match_id)
             controller._on_net_message(envelope)
             self.app.scenes.switch(MatchScene(self.app), controller=controller)
+        elif envelope.type == MsgType.CHALLENGE_RESULT.value:
+            status = envelope.payload.get("status")
+            if status in ("declined", "offline", "expired", "invalid",
+                          "cancelled"):
+                self._awaiting = False
+                self.phase = PICK
+                self.error = envelope.payload.get(
+                    "message", "The challenge fell through.")
         elif envelope.type == MsgType.ERROR.value:
             self._awaiting = False
             self.phase = PICK

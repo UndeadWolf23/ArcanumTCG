@@ -313,7 +313,8 @@ class DeckBuilderScene(Scene):
             return
         if op == "list":
             self.saved = result.decks
-            self.dd_saved.options = ["My decks..."] + [
+            self.dd_saved.options = [
+                f"My decks...  {len(self.saved)}/{self.MAX_DECKS}"] + [
                 f"{d.name}  ({d.size})" for d in self.saved]
             self.dd_saved.selected = 0
         elif op == "save":
@@ -340,8 +341,14 @@ class DeckBuilderScene(Scene):
         self._show_toast(f"Loaded '{picked.name}'.")
 
     # ------------------------------------------------------------ actions
+    MAX_DECKS = 30
+
     def _save(self) -> None:
         if self.busy:
+            return
+        if not self.deck.id and len(self.saved) >= self.MAX_DECKS:
+            self._show_toast(f"Account deck limit reached "
+                             f"({self.MAX_DECKS}). Delete one first.")
             return
         self.deck.name = (self.deck_name.text.strip() or "Unnamed Deck")[:40]
         ok, reason = validate_deck(self.deck.cards, self.collection)

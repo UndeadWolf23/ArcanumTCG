@@ -19,10 +19,12 @@ def card_to_dict(card: CardInstance) -> dict[str, Any]:
         "max_health": card.max_health, "exhausted": card.exhausted,
         "sick": card.sick, "haste": card.haste, "text": card.text,
         "effect": card.effect.value, "needs_target": card.needs_target,
+        "card_id": card.card_id,
         "keywords": dict(card.keywords),
         "charges": dict(card.charges),
         "is_token": card.is_token,
         "temp_attack": card.temp_attack,
+        "temp_health": card.temp_health,
     }
 
 
@@ -36,10 +38,12 @@ def card_from_dict(data: dict[str, Any]) -> CardInstance:
         sick=bool(data.get("sick", False)), haste=bool(data.get("haste", False)),
         text=str(data.get("text", "")), effect=Effect(data.get("effect", "none")),
         needs_target=bool(data.get("needs_target", False)),
+        card_id=str(data.get("card_id", "")),
         keywords=dict(data.get("keywords", {})),
         charges=dict(data.get("charges", {})),
         is_token=bool(data.get("is_token", False)),
         temp_attack=int(data.get("temp_attack", 0)),
+        temp_health=int(data.get("temp_health", 0)),
     )
 
 
@@ -51,6 +55,7 @@ def _update_card(card: CardInstance, data: dict[str, Any]) -> None:
     card.sick = bool(data.get("sick", card.sick))
     card.charges = dict(data.get("charges", card.charges))
     card.temp_attack = int(data.get("temp_attack", card.temp_attack))
+    card.temp_health = int(data.get("temp_health", card.temp_health))
 
 
 def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:
@@ -66,6 +71,7 @@ def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:
             "board": [card_to_dict(c) for c in player.board],
             "relics": [card_to_dict(c) for c in player.relics],
             "barriers": [card_to_dict(c) for c in player.barriers],
+            "void": [card_to_dict(c) for c in player.void],
         }
         if full_hand:
             data["hand"] = [card_to_dict(c) for c in player.hand]
@@ -126,6 +132,7 @@ def apply_snapshot(mirror: MatchState, snap: dict[str, Any]) -> None:
         _sync_list(player.board, data.get("board", []), pool)
         _sync_list(player.relics, data.get("relics", []), pool)
         _sync_list(player.barriers, data.get("barriers", []), pool)
+        _sync_list(player.void, data.get("void", []), pool)
         if player is you:
             _sync_list(player.hand, data.get("hand", []), pool)
     # opponent hand stays empty in the mirror; the count travels separately

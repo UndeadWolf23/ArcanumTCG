@@ -58,6 +58,7 @@ class App:
         self._silent_lock = threading.Lock()
 
         self.bus.subscribe(Events.APP_QUIT, self.quit)
+        self.bus.subscribe(Events.PROFILE_READY, self._on_profile_ready)
         self.bus.subscribe(Events.AUTH_LOGIN_SUCCESS, self._on_login)
         self.bus.subscribe(Events.AUTH_LOGOUT, self._on_logout)
 
@@ -197,7 +198,9 @@ class App:
         self.backend.refresh_deck_store()
         token = self.backend.session.saved_token() or "dev"
         try:
-            self.backend.net.connect(token, name=user.username)
+            self.backend.net.connect(
+                token, name=self.backend.display_name,
+                uid=getattr(user, "id", "") or "")
         except Exception:  # noqa: BLE001 - going online must never block play
             log.exception("Could not start network client")
 
@@ -277,3 +280,13 @@ class App:
 
     def quit(self) -> None:
         self.running = False
+
+    def _on_profile_ready(self, **_kw) -> None:
+        token = self.backend.session.access_token
+        name = self.backend.display_name
+        net = self.backend.net
+        if token and getattr(net, "_name", name) != name:
+            log.info("Reconnecting as '%s' (profile username).", name)
+            user = self.backend.session.user
+            net.connect(token, name=name,
+                        uid=getattr(user, "id", "") or "")

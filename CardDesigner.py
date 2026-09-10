@@ -116,6 +116,10 @@ def publish(spec: CardSpec, art_path: Path | None,
     base = SUPABASE_URL.rstrip("/")
 
     # 1) upsert the card row
+    if art_path is not None and art_path.exists():
+        # fresh filename each publish so player clients never show stale art
+        import time as _time
+        spec.image = f"{spec.id}-{int(_time.time()) % 100000:05d}.png"
     row = {"id": spec.id, "name": spec.name, "data": spec.to_dict(),
            "collectible": spec.collectible}
     req = _urlreq.Request(
@@ -143,7 +147,7 @@ def publish(spec: CardSpec, art_path: Path | None,
 
     # 2) upload art (optional)
     if art_path is not None and art_path.exists():
-        object_name = f"{spec.id}.png"
+        object_name = spec.image
         req = _urlreq.Request(
             base + f"/storage/v1/object/card-art/{object_name}",
             data=art_path.read_bytes(),

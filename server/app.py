@@ -21,6 +21,7 @@ import websockets
 
 from arcanum.services.net.protocol import Envelope, MsgType, ProtocolError
 from server import logic
+from server import social
 from server.lobby import Lobby
 from server.sessions import MatchSession
 
@@ -47,6 +48,7 @@ class Connection:
     def __init__(self, ws) -> None:
         self.ws = ws
         self.name = "Adventurer"
+        self.uid = ""
         self.session: MatchSession | None = None
         self.seat_index = 0
         self.in_queue = False
@@ -60,6 +62,21 @@ class Connection:
             reply = logic.handle_envelope(env, len(CONNECTED))
             if reply is not None:
                 await self.send(reply.encode())
+            return
+        if mtype == MsgType.PRESENCE_QUERY.value:
+            await social.handle_presence(self, env)
+            return
+        if mtype == MsgType.CHALLENGE_SEND.value:
+            await social.handle_challenge_send(self, env)
+            return
+        if mtype == MsgType.CHALLENGE_ACCEPT.value:
+            await social.handle_challenge_accept(self, env)
+            return
+        if mtype == MsgType.CHALLENGE_DECLINE.value:
+            await social.handle_challenge_decline(self, env)
+            return
+        if mtype == MsgType.CHALLENGE_CANCEL.value:
+            await social.handle_challenge_cancel(self, env)
             return
         if mtype == MsgType.QUEUE_JOIN.value:
             mode = str(env.payload.get("mode", "pvp")).lower()
@@ -112,8 +129,9 @@ async def handler(websocket):
     conn = Connection(websocket)
     try:
         raw = await asyncio.wait_for(websocket.recv(), timeout=logic.HELLO_TIMEOUT)
-        conn.name, _token = logic.parse_hello(raw)
+        conn.name, _token, conn.uid = logic.parse_hello(raw)
         CONNECTED.add(websocket)
+        social.register(conn)
         log.info("HELLO from %s (%s) — %d online", conn.name, peer, len(CONNECTED))
         await websocket.send(logic.make_welcome(conn.name, len(CONNECTED)).encode())
 
@@ -134,6 +152,7 @@ async def handler(websocket):
         log.exception("Unexpected error for %s", peer)
     finally:
         CONNECTED.discard(websocket)
+        social.unregister(conn)
         try:
             await LOBBY.on_disconnect(conn)
             if conn.session is not None and not conn.session.closed:

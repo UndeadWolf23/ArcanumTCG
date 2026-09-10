@@ -41,7 +41,8 @@ class NetworkClient(ABC):
 
     # -- interface -------------------------------------------------------
     @abstractmethod
-    def connect(self, auth_token: str, name: str = "") -> None: ...
+    def connect(self, auth_token: str, name: str = "",
+                uid: str = "") -> None: ...
 
     @abstractmethod
     def disconnect(self) -> None: ...
@@ -58,7 +59,8 @@ class NetworkClient(ABC):
 class OfflineClient(NetworkClient):
     """Stand-in used until the game server exists. Never connects."""
 
-    def connect(self, auth_token: str, name: str = "") -> None:
+    def connect(self, auth_token: str, name: str = "",
+                uid: str = "") -> None:
         log.info("OfflineClient: connect() called — running in offline mode.")
         self.state = ConnectionState.DISCONNECTED
         self.bus.publish_threadsafe(Events.NET_DISCONNECTED, reason="offline_mode")
@@ -97,10 +99,17 @@ class WebSocketClient(NetworkClient):
         self._pinger: threading.Thread | None = None
 
     # -- interface ---------------------------------------------------------
-    def connect(self, auth_token: str, name: str = "") -> None:
+    def connect(self, auth_token: str, name: str = "",
+                uid: str = "") -> None:
+        name = name or "Adventurer"
         if self._thread and self._thread.is_alive():
-            return
-        self._token, self._name = auth_token, name or "Adventurer"
+            if (name, uid) == (self._name, getattr(self, "_uid", "")):
+                return                      # already connected as this identity
+            log.info("Re-identifying as '%s'.", name)
+            self.disconnect()
+            self._thread.join(timeout=2.0)
+        self._token, self._name = auth_token, name
+        self._uid = uid
         self._stop.clear()
         self.state = ConnectionState.CONNECTING
         self._thread = threading.Thread(target=self._run, daemon=True,
@@ -139,7 +148,8 @@ class WebSocketClient(NetworkClient):
                 ws.settimeout(30)
                 self._ws = ws
                 hello = self._make(MsgType.HELLO,
-                                   {"token": self._token, "name": self._name}, "")
+                                   {"token": self._token, "name": self._name,
+                                    "uid": self._uid}, "")
                 ws.send(hello.encode())
                 backoff = 1.0
                 while not self._stop.is_set():
