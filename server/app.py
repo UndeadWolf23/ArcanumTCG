@@ -21,7 +21,7 @@ import websockets
 
 from arcanum.services.net.protocol import Envelope, MsgType, ProtocolError
 from server import logic
-from server import social
+from server import economy, social
 from server.lobby import Lobby
 from server.sessions import MatchSession
 
@@ -56,12 +56,56 @@ class Connection:
     async def send(self, raw: str) -> None:
         await self.ws.send(raw)
 
+    async def _send_economy(self, first: bool = False,
+                            extra: dict | None = None) -> None:
+        if not (self.uid and economy.enabled()):
+            await self.send(Envelope(type=MsgType.ECONOMY_STATE.value,
+                                     payload={"enabled": False}).encode())
+            return
+        welcome = False
+        if first:
+            welcome = await economy.claim_welcome(self.uid)
+        state = await economy.wallet(self.uid) or {}
+        payload = {"enabled": True, **state}
+        if welcome:
+            payload["welcome_granted"] = True
+        if extra:
+            payload.update(extra)
+        await self.send(Envelope(type=MsgType.ECONOMY_STATE.value,
+                                 payload=payload).encode())
+
     async def route(self, env: Envelope) -> None:
         mtype = env.type
         if mtype == MsgType.PING.value:
             reply = logic.handle_envelope(env, len(CONNECTED))
             if reply is not None:
                 await self.send(reply.encode())
+            return
+        if mtype == MsgType.ECONOMY_GET.value:
+            await self._send_economy(first=bool(env.payload.get("first")))
+            return
+        if mtype == MsgType.SHOP_BUY.value:
+            if self.uid and economy.enabled():
+                result = await economy.buy(
+                    self.uid, str(env.payload.get("pack", "")),
+                    int(env.payload.get("qty", 0) or 0))
+                await self._send_economy(extra={"purchase": result})
+            return
+        if mtype == MsgType.PACK_OPEN.value:
+            if self.uid and economy.enabled():
+                pack = str(env.payload.get("pack", ""))
+                cards = await economy.open_pack(self.uid, pack)
+                await self.send(Envelope(
+                    type=MsgType.PACK_RESULT.value,
+                    payload={"pack": pack, "cards": cards or [],
+                             "ok": cards is not None}).encode())
+                await self._send_economy()
+            return
+        if mtype == MsgType.CLAIM_CHALLENGE.value:
+            if self.uid and economy.enabled():
+                result = await economy.claim_challenge(
+                    self.uid, int(env.payload.get("slot", -1) or -1))
+                await self._send_economy(extra={"claim": result})
             return
         if mtype == MsgType.PRESENCE_QUERY.value:
             await social.handle_presence(self, env)

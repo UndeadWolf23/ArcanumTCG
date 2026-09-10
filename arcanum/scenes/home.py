@@ -19,7 +19,7 @@ from arcanum.ui import theme
 from arcanum.ui.animation import approach
 from arcanum.ui.widgets import Button, LinkButton, apply_cursor
 
-NAV_ITEMS = ("Home", "Social", "Decks", "Packs", "Store", "Mastery")
+NAV_ITEMS = ("Home", "Social", "Decks", "Packs", "Store")
 
 SLIDES = (
     {"title": "Welcome to Arcanum",
@@ -223,6 +223,9 @@ class HomeScene(Scene):
         elif label == "Packs":
             from arcanum.scenes.packs import PacksScene
             self.app.scenes.push(PacksScene(self.app))
+        elif label == "Store":
+            from arcanum.scenes.store import StoreScene
+            self.app.scenes.push(StoreScene(self.app))
         elif label != "Home":
             self._todo(label)
 
@@ -243,6 +246,11 @@ class HomeScene(Scene):
         self._toast_timer = 3.0
 
     def handle_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            for rect, slot in getattr(self, "_claim_rects", []):
+                if rect.collidepoint(event.pos):
+                    self._claim(slot)
+                    return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             self._settings()
             return
@@ -259,6 +267,144 @@ class HomeScene(Scene):
                     action()
                     return
 
+    def _claim(self, slot: int) -> None:
+        from arcanum.services.net.protocol import MsgType
+        self.app.backend.net.send(MsgType.CLAIM_CHALLENGE, {"slot": slot})
+        self.app.audio.ui_sound("confirm")
+
+    def _draw_dailies(self, surface) -> None:
+        """Daily challenges + rewarded-wins pips, bottom-right of the hub."""
+        self._claim_rects = []
+        wallet = self.app.backend.wallet
+        if not wallet.get("enabled"):
+            return
+        s = self.s
+        w, h = surface.get_size()
+        dailies = list(wallet.get("dailies", []))[:3]
+        panel = pygame.Rect(0, 0, int(380 * s),
+                            int(66 * s) + len(dailies) * int(52 * s))
+        panel.bottomright = (w - int(24 * s), h - int(24 * s))
+        theme.draw_panel(surface, panel, fill=theme.NAVY,
+                         border=theme.NAVY_EDGE, radius=14)
+        theme.draw_text(surface, "DAILY CHALLENGES",
+                        (panel.x + int(16 * s), panel.y + int(20 * s)),
+                        theme.body_font(int(12 * s), bold=True),
+                        theme.GOLD_BRIGHT, anchor="midleft")
+        wins = int(wallet.get("wins_today", 0) or 0)
+        for i in range(3):
+            color = theme.GOLD if i < wins else theme.NAVY_EDGE
+            theme.aa_circle(surface, color,
+                            (panel.right - int(16 * s) - i * int(18 * s),
+                             panel.y + int(20 * s)), int(6 * s))
+        theme.draw_text(surface, f"wins {wins}/3",
+                        (panel.right - int(70 * s), panel.y + int(20 * s)),
+                        theme.body_font(int(10 * s)), theme.TEXT_DIM,
+                        anchor="midright")
+        y = panel.y + int(42 * s)
+        for entry in dailies:
+            name = entry.get("name", entry.get("id", "?"))
+            progress = int(entry.get("progress", 0))
+            goal = max(1, int(entry.get("goal", 1)))
+            claimed = bool(entry.get("claimed"))
+            ready = progress >= goal and not claimed
+            theme.draw_text(surface, name,
+                            (panel.x + int(16 * s), y + int(8 * s)),
+                            theme.body_font(int(12 * s)),
+                            theme.TEXT_FAINT if claimed else theme.TEXT,
+                            anchor="midleft")
+            bar = pygame.Rect(panel.x + int(16 * s), y + int(22 * s),
+                              int(240 * s), int(8 * s))
+            pygame.draw.rect(surface, theme.NAVY_RAISED, bar,
+                             border_radius=4)
+            fill = bar.copy()
+            fill.width = int(bar.width * min(1.0, progress / goal))
+            if fill.width > 2:
+                pygame.draw.rect(surface, theme.SUCCESS if ready or claimed
+                                 else theme.GOLD, fill, border_radius=4)
+            theme.draw_text(surface, f"{min(progress, goal)}/{goal}",
+                            (bar.right + int(10 * s), bar.centery),
+                            theme.body_font(int(10 * s)), theme.TEXT_DIM,
+                            anchor="midleft")
+            if claimed:
+                theme.draw_text(surface, "claimed ✓",
+                                (panel.right - int(16 * s), y + int(14 * s)),
+                                theme.body_font(int(11 * s)), theme.SUCCESS,
+                                anchor="midright")
+            elif ready:
+                btn = pygame.Rect(0, 0, int(76 * s), int(26 * s))
+                btn.midright = (panel.right - int(14 * s), y + int(14 * s))
+                pulse = 0.4 + 0.25 * abs(math.sin(self._time * 3.2))
+                theme.draw_glow_rect(surface, btn, theme.GOLD_GLOW, pulse,
+                                     radius=8, spread=7)
+                theme.draw_panel(surface, btn, fill=theme.GOLD,
+                                 border=theme.GOLD, radius=8)
+                theme.draw_text(surface, "+300", btn.center,
+                                theme.body_font(int(12 * s), bold=True),
+                                theme.TEXT_ON_GOLD, anchor="center")
+                self._claim_rects.append((btn, int(entry.get("slot", 0))))
+            y += int(52 * s)
+
+    def _pump_rewards(self, dt: float) -> None:
+        if not hasattr(self, "_banner"):
+            self._banner = None
+            self._banner_t = 0.0
+        if self._banner is not None:
+            self._banner_t += dt
+            if self._banner_t > 4.2:
+                self._banner = None
+            return
+        inbox = self.app.backend.pending_rewards
+        if not inbox:
+            return
+        reward = inbox.pop(0)
+        lines: list[str] = []
+        if reward.get("type") == "welcome":
+            lines = ["Welcome to Arcanum!",
+                     f"You've been gifted {reward.get('packs', 10)} "
+                     "Adventure Packs.",
+                     "Open them in the Packs tab — good luck, mage."]
+        else:
+            if reward.get("gold_awarded"):
+                lines.append(f"Victory reward:  +{reward['gold_awarded']} "
+                             f"gold  (win {reward.get('win_number', '?')}/3 "
+                             "today)")
+            for done in reward.get("challenges_completed", [])[:3]:
+                lines.append(f"Challenge complete:  {done.get('name', '?')} "
+                             "— 300 gold ready to claim!")
+        if lines:
+            self._banner = lines
+            self._banner_t = 0.0
+            self.app.audio.ui_sound("confirm")
+
+    def _draw_banner(self, surface) -> None:
+        banner = getattr(self, "_banner", None)
+        if not banner:
+            return
+        w, h = surface.get_size()
+        t = self._banner_t
+        slide = min(1.0, t * 3.0)
+        fade = min(1.0, (4.2 - t) / 0.5)
+        alpha = int(255 * max(0.0, min(slide, fade)))
+        box_h = 34 + 26 * len(banner)
+        box = pygame.Rect(0, 0, min(w - 80, 640), box_h)
+        box.midtop = (w // 2, int(-box_h + slide * (box_h + 84)))
+        veil = pygame.Surface(box.size, pygame.SRCALPHA)
+        pygame.draw.rect(veil, (*theme.NAVY, min(240, alpha)),
+                         veil.get_rect(), border_radius=14)
+        pygame.draw.rect(veil, (*theme.GOLD, alpha), veil.get_rect(),
+                         width=2, border_radius=14)
+        surface.blit(veil, box.topleft)
+        pulse = 0.35 + 0.2 * abs(math.sin(self._time * 3))
+        theme.draw_glow_rect(surface, box, theme.GOLD_GLOW, pulse * slide,
+                             radius=14, spread=14)
+        y = box.y + 22
+        for i, line in enumerate(banner):
+            theme.draw_text(surface, line, (box.centerx, y),
+                            theme.body_font(16, bold=(i == 0)),
+                            theme.GOLD_BRIGHT if i == 0 else theme.TEXT,
+                            anchor="center", alpha=alpha)
+            y += 26
+
     def _watch_challenges(self) -> None:
         count = len(self.app.backend.challenges)
         if count > getattr(self, "_seen_challenges", 0):
@@ -270,6 +416,7 @@ class HomeScene(Scene):
     def update(self, dt: float) -> None:
         self._time += dt
         self._watch_challenges()
+        self._pump_rewards(dt)
         self._toast_timer = max(0.0, self._toast_timer - dt)
         self._slide_timer += dt
         if self._slide_timer > 7.0:
@@ -350,8 +497,10 @@ class HomeScene(Scene):
         # currency chips: coins (coin.png) + essence placeholder
         chip_x = w - int(300 * s)
         coin = self._coin_icon(int(22 * s))
-        for icon, icon_color, amount in ((coin, theme.GOLD, "1,000"),
-                                         (None, (86, 156, 255), "50")):
+        gold = f"{self.app.backend.gold:,}"
+        packs_n = str(sum(self.app.backend.packs_owned.values()))
+        for icon, icon_color, amount in ((coin, theme.GOLD, gold),
+                                         (None, (86, 156, 255), packs_n)):
             chip = pygame.Rect(chip_x, int(18 * s), int(96 * s), int(32 * s))
             theme.draw_panel(surface, chip, fill=theme.NAVY,
                              border=theme.NAVY_EDGE, radius=16)
@@ -491,3 +640,5 @@ class HomeScene(Scene):
             theme.draw_text(surface, self.toast, box.center,
                             theme.body_font(15), theme.TEXT, anchor="center",
                             alpha=int(255 * fade))
+        self._draw_dailies(surface)
+        self._draw_banner(surface)

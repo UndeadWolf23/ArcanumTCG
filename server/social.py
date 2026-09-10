@@ -152,8 +152,10 @@ async def handle_challenge_accept(conn: Any, env: Envelope) -> None:
     conn.deck = deck if isinstance(deck, dict) else None
 
     seats = [Seat(challenger.name, challenger.send,
-                  deck=getattr(challenger, "deck", None)),
-             Seat(conn.name, conn.send, deck=getattr(conn, "deck", None))]
+                  deck=getattr(challenger, "deck", None),
+                  uid=getattr(challenger, "uid", "")),
+             Seat(conn.name, conn.send, deck=getattr(conn, "deck", None),
+                  uid=getattr(conn, "uid", ""))]
     session = MatchSession(seats)
     for index, player in enumerate((challenger, conn)):
         player.session, player.seat_index = session, index

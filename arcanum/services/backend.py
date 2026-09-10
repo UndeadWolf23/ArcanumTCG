@@ -32,6 +32,11 @@ class Backend:
         self.social: SupabaseSocial | None = None
         self.profile: dict | None = None          # {id, username, coins}
         self.challenges: list[dict] = []          # incoming friend challenges
+        self.wallet: dict = {}                    # server economy snapshot
+        self.pending_rewards: list[dict] = []     # hub-return animations
+        self.pack_results: list[dict] = []        # opened-pack reveals
+        self._economy_requested = False
+        bus.subscribe(Events.NET_CONNECTED, self._request_economy)
         bus.subscribe(Events.NET_MESSAGE, self._on_social_message)
 
     def refresh_deck_store(self) -> None:
@@ -102,9 +107,40 @@ class Backend:
         user = self.session.user
         return user.username if user else "Adventurer"
 
+    def _request_economy(self, **_kw) -> None:
+        from arcanum.services.net.protocol import MsgType
+        first = not self._economy_requested
+        self._economy_requested = True
+        self.net.send(MsgType.ECONOMY_GET, {"first": first})
+
+    @property
+    def gold(self) -> int:
+        return int(self.wallet.get("coins", 0) or 0)
+
+    @property
+    def packs_owned(self) -> dict:
+        return dict(self.wallet.get("packs", {}) or {})
+
+    def _on_economy_message(self, envelope) -> bool:
+        from arcanum.services.net.protocol import MsgType
+        if envelope.type == MsgType.ECONOMY_STATE.value:
+            self.wallet = dict(envelope.payload)
+            if envelope.payload.get("welcome_granted"):
+                self.pending_rewards.append({"type": "welcome", "packs": 10})
+            return True
+        if envelope.type == MsgType.ECONOMY_DELTA.value:
+            self.pending_rewards.append(dict(envelope.payload))
+            return True
+        if envelope.type == MsgType.PACK_RESULT.value:
+            self.pack_results.append(dict(envelope.payload))
+            return True
+        return False
+
     def _on_social_message(self, envelope=None, **_kw) -> None:
         from arcanum.services.net.protocol import MsgType
         if envelope is None:
+            return
+        if self._on_economy_message(envelope):
             return
         if envelope.type == MsgType.CHALLENGE_INCOMING.value:
             name = str(envelope.payload.get("from", ""))

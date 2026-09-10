@@ -57,6 +57,15 @@ class MsgType(str, Enum):
     CHALLENGE_CANCEL = "social.challenge.cancel"
     CHALLENGE_RESULT = "social.challenge.result"
 
+    # economy (server-authoritative gold, packs, dailies)
+    ECONOMY_GET = "economy.get"
+    ECONOMY_STATE = "economy.state"
+    ECONOMY_DELTA = "economy.delta"          # post-match rewards
+    SHOP_BUY = "economy.shop.buy"
+    PACK_OPEN = "economy.pack.open"
+    PACK_RESULT = "economy.pack.result"
+    CLAIM_CHALLENGE = "economy.challenge.claim"
+
     # -- in-match: server events (authoritative results)
     EVENT_GAME_STATE = "event.game_state"      # full snapshot (join/reconnect)
     EVENT_STATE_DELTA = "event.state_delta"    # incremental update

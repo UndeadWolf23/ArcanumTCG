@@ -42,34 +42,7 @@ def _creature(cid, name, cost, atk, hp, rarity=Rarity.COMMON, text="",
 
 
 CATALOG: tuple[CardDef, ...] = (
-    # -- creatures: costs 1-7, a few statlines per cost --------------------
-    _creature("c_wisp", "Astral Wisp", 1, 1, 1, text="A flicker of starlight."),
-    _creature("c_moth", "Lunar Moth", 1, 1, 2,
-              text="Drawn to the glow of ley lines."),
-    _creature("c_sprite", "Meteor Sprite", 2, 2, 1, Rarity.UNCOMMON,
-              text="It arrives before its own light.", haste=True),
-    _creature("c_adept", "Ley Adept", 2, 2, 2,
-              text="Student of the drifting constellations."),
-    _creature("c_owl", "Umbral Owl", 2, 1, 3,
-              text="Sees by the dark between stars."),
-    _creature("c_sentinel", "Star Sentinel", 3, 2, 4,
-              text="It has kept one watch for a thousand years."),
-    _creature("c_prowler", "Void Prowler", 3, 4, 2, Rarity.UNCOMMON,
-              text="Hunts in the silence beyond the veil."),
-    _creature("c_golem", "Runestone Golem", 4, 3, 5,
-              text="Carved with the map of a dead sky."),
-    _creature("c_corsair", "Comet Corsair", 4, 4, 3, Rarity.UNCOMMON,
-              text="Haste hits harder falling from orbit.", haste=True),
-    _creature("c_oracle", "Nebula Oracle", 5, 4, 5, Rarity.RARE,
-              text="Reads tomorrow in the drifting dust."),
-    _creature("c_wyrm", "Aurora Wyrm", 5, 5, 4, Rarity.EPIC,
-              text="Its wake paints the night."),
-    _creature("c_colossus", "Eclipse Colossus", 6, 6, 6, Rarity.EPIC,
-              text="Where it stands, noon becomes midnight."),
-    _creature("c_seraph", "Zenith Seraph", 7, 7, 7, Rarity.LEGENDARY,
-              text="The high point of every sky."),
-    _creature("c_devourer", "Night Devourer", 7, 8, 5, Rarity.LEGENDARY,
-              text="It swallowed a constellation whole."),
+    # (base test creatures removed — real cards ship via the Card Designer)
 
     # -- spells --------------------------------------------------------------
     CardDef("s_insight", "Astral Insight", Kind.SPELL, 3, Rarity.COMMON,
@@ -335,6 +308,15 @@ def all_cards() -> tuple[CardDef, ...]:
     return CATALOG + tuple(extra)
 
 
+def by_id_safe(card_id: str) -> CardDef | None:
+    """by_id that also resolves official (designer-published) cards."""
+    found = by_id(card_id)
+    if found is not None:
+        return found
+    spec = spec_by_id(card_id)
+    return _spec_to_def(spec) if spec is not None else None
+
+
 def by_id(card_id: str) -> CardDef | None:
     if card_id in BY_ID:
         return BY_ID[card_id]
@@ -380,13 +362,13 @@ def starter_deck_cards() -> dict[str, int]:
     deck = {
         "ch_luna": 1,
         # early heroes
-        "c_wisp": 2, "c_moth": 2, "t_greedling": 2, "t_surgecaster": 2,
-        "t_blooddrinker": 2,
+        "t_greedling": 2, "t_surgecaster": 2, "t_blooddrinker": 2,
+        "t_sage": 2, "t_gravecaller": 2,
         # mid heroes incl. minion spawners + planes
         "t_umbral_stalker": 2, "t_veilwarden": 2, "t_devoted": 2,
         "t_broodmother": 2, "t_bannerlord": 1, "t_stormvessel": 2,
         # top end
-        "t_ascendant": 1, "c_wyrm": 1,
+        "t_ascendant": 1, "t_stoneheart": 1,
         # spells + relics + barriers
         "s_star": 2, "s_insight": 1, "r_crystal": 1,
         "b_starwall": 1, "b_sanctum": 1,

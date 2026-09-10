@@ -109,6 +109,8 @@ class PacksScene(Scene):
         self._tearing = False
         self._tear_anchor = 0
         self._strip_fly = None                 # dict once the top rips free
+        self.note = ""
+        self.note_timer = 0.0
         self._zoom_tween: Optional[Tween] = None
         self._pack_drop = 0.0
         self._hover_pack = None
@@ -286,7 +288,19 @@ class PacksScene(Scene):
         if self.chosen is not None:
             self._begin_tear(self.chosen)
 
+    def _owned(self, pack_id: str) -> int:
+        return int(self.app.backend.packs_owned.get(pack_id, 0))
+
+    def _economy_on(self) -> bool:
+        state = getattr(getattr(self.app.backend.net, "state", None),
+                        "name", "")
+        return state == "CONNECTED" and \
+            bool(self.app.backend.wallet.get("enabled"))
+
     def _choose(self, pack) -> None:
+        if self._economy_on() and self._owned(pack.pack_id) <= 0:
+            self._show_note(f"No {pack.name}s owned — visit the Store.")
+            return
         self.chosen = pack
         self.phase = ZOOM
         self._zoom_tween = Tween(0.0, 1.0, 0.45)
@@ -295,6 +309,11 @@ class PacksScene(Scene):
     def _begin_tear(self, pack) -> None:
         self.chosen = pack
         self.phase = TEAR
+        if self._economy_on():
+            from arcanum.services.net.protocol import MsgType
+            self.app.backend.pack_results.clear()
+            self.app.backend.net.send(MsgType.PACK_OPEN,
+                                      {"pack": self.chosen.pack_id})
         self.tear = 0.0
         self._tearing = False
         self._strip_fly = None
@@ -316,12 +335,30 @@ class PacksScene(Scene):
         for _ in range(70):
             self._spark((rect.x + random.uniform(0, rect.width), seam_y),
                         theme.GOLD_BRIGHT, speed=340)
-        # roll the cards and schedule the eruption
-        rolled = open_pack(self.chosen.pack_id, self.rng)
+        # roll the cards: the SERVER consumes the pack and rolls when the
+        # economy is live (authoritative); offline practice rolls locally
+        rolled = None
+        if self._economy_on():
+            result = self._take_pack_result()
+            if result is not None and result.get("ok"):
+                from arcanum.game import catalog as _cat
+                rolled = [c for c in (_cat.by_id_safe(cid)
+                                      for cid in result.get("cards", []))
+                          if c is not None]
+        if rolled is None:
+            rolled = open_pack(self.chosen.pack_id, self.rng)
         mouth = (rect.centerx, seam_y + 10)
         for i, card in enumerate(rolled):
             self.cards.append(CardReveal(card, mouth, self.slots[i],
                                          delay=0.35 + i * 0.09))
+
+    def _take_pack_result(self):
+        results = self.app.backend.pack_results
+        return results.pop(0) if results else None
+
+    def _show_note(self, message: str) -> None:
+        self.note = message
+        self.note_timer = 2.6
 
     def _reveal_all(self) -> None:
         for reveal in self.cards:
@@ -446,6 +483,7 @@ class PacksScene(Scene):
 
     # ------------------------------------------------------------ update
     def update(self, dt: float) -> None:
+        self.note_timer = max(0.0, getattr(self, "note_timer", 0.0) - dt)
         self._time += dt
         self.flash = max(0.0, self.flash - dt * 3.2)
         self.shake = max(0.0, self.shake - dt * 22)
@@ -575,6 +613,20 @@ class PacksScene(Scene):
             surface.blit(veil, (0, 0))
 
         self.btn_back.draw(surface)
+        if getattr(self, "note_timer", 0) > 0 and self.note:
+            fade = min(1.0, self.note_timer / 0.4)
+            box = pygame.Rect(0, 0, min(surface.get_width() - 80, 520), 42)
+            box.midbottom = (surface.get_width() // 2,
+                             surface.get_height() - 84)
+            veil = pygame.Surface(box.size, pygame.SRCALPHA)
+            pygame.draw.rect(veil, (*theme.NAVY_RAISED, int(235 * fade)),
+                             veil.get_rect(), border_radius=10)
+            pygame.draw.rect(veil, (*theme.GOLD_DIM, int(255 * fade)),
+                             veil.get_rect(), width=1, border_radius=10)
+            surface.blit(veil, box.topleft)
+            theme.draw_text(surface, self.note, box.center,
+                            theme.body_font(15), theme.TEXT,
+                            anchor="center", alpha=int(255 * fade))
 
     # ------------------------------------------------------ inspect + spotlight
     def _big_card(self, card: CardDef, height: int):
@@ -668,7 +720,9 @@ class PacksScene(Scene):
 
     def _draw_select(self, surface, ox, oy) -> None:
         s = self.s
-        theme.draw_text(surface, "Choose a pack — free while the forges warm up",
+        subtitle = ("Choose a pack to open" if self._economy_on()
+                    else "Practice mode — connect to use your real packs")
+        theme.draw_text(surface, subtitle,
                         (surface.get_width() // 2, int(78 * s)),
                         theme.body_font(int(15 * s)), theme.TEXT_DIM,
                         anchor="center")
@@ -696,6 +750,15 @@ class PacksScene(Scene):
                             theme.body_font(int(17 * s), bold=True),
                             theme.GOLD_BRIGHT if hover else theme.TEXT,
                             anchor="center")
+            if self._economy_on():
+                owned = self._owned(pack.pack_id)
+                label = (f"{owned} owned" if owned
+                         else "none — visit the Store")
+                color = theme.SUCCESS if owned else theme.TEXT_FAINT
+                theme.draw_text(surface, label,
+                                (rect.centerx, rect.bottom + int(48 * s)),
+                                theme.body_font(int(12 * s)), color,
+                                anchor="center")
             theme.draw_text(surface, "FREE",
                             (rect.centerx, rect.bottom + int(50 * s)),
                             theme.body_font(int(13 * s)), theme.SUCCESS,

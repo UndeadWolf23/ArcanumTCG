@@ -41,13 +41,18 @@ class DummyOpponent:
         Prefers a trade it survives, then any kill, then the weakest enemy;
         goes face once the row is clear.
         """
-        ready = [c for c in match.player(self.index).board
-                 if match.can_attack(self.index, c.uid)[0]]
-        if not ready:
-            return None
-        attacker = max(ready, key=lambda c: c.attack)
-        targets = match.valid_attack_targets(self.index)
-        if not targets:
+        ready = sorted([c for c in match.player(self.index).board
+                        if match.can_attack(self.index, c.uid)[0]],
+                       key=lambda c: -c.attack)
+        attacker = None
+        targets: list = []
+        for candidate in ready:          # per-attacker legality (Umbral etc.)
+            candidate_targets = match.valid_attack_targets(self.index,
+                                                           candidate)
+            if candidate_targets:
+                attacker, targets = candidate, candidate_targets
+                break
+        if attacker is None:
             return None
         champion = match.player(1 - self.index).champion
         enemy_creatures = [t for t in targets if t is not champion]

@@ -34,6 +34,7 @@ class Seat:
     send: Optional[SendFn] = None       # None => AI seat
     connected: bool = True
     deck: Optional[dict] = None         # submitted with QUEUE_JOIN
+    uid: str = ""                       # permanent account id (rewards)
 
     @property
     def is_ai(self) -> bool:
@@ -101,7 +102,47 @@ class MatchSession:
             log.info("Send to seat %d failed; marking disconnected.", seat_index)
             seat.connected = False
 
+    def _count_progress(self, events: list[dict[str, Any]]) -> None:
+        stats = getattr(self, "stats", None)
+        if stats is None:
+            stats = self.stats = [
+                {k: 0 for k in ("summon_heroes", "sacrifice_permanents",
+                                "cast_spells", "gain_life", "attack_heroes",
+                                "destroy_heroes", "draw_cards")}
+                for _ in (0, 1)]
+        for event in events:
+            etype = event.get("type")
+            who = event.get("player")
+            if who not in (0, 1):
+                continue
+            if etype == "played":
+                card = event.get("card")
+                if isinstance(card, dict):
+                    kind = str(card.get("kind", ""))
+                else:
+                    kind = str(getattr(getattr(card, "kind", None),
+                                       "value", ""))
+                if kind == "creature":
+                    stats[who]["summon_heroes"] += 1
+                elif kind == "spell":
+                    stats[who]["cast_spells"] += 1
+            elif etype == "spawn":
+                stats[who]["summon_heroes"] += 1
+            elif etype == "attack":
+                stats[who]["attack_heroes"] += 1
+            elif etype == "death":
+                # credit the OTHER side with a destroy
+                stats[1 - who]["destroy_heroes"] += 1
+            elif etype == "draw" and not event.get("skipped"):
+                stats[who]["draw_cards"] += 1
+            elif etype == "heal":
+                stats[who]["gain_life"] += int(event.get("amount", 0) or 0)
+            elif etype == "keyword" and event.get("keyword") in (
+                    "consume", "tribute", "offering"):
+                stats[who]["sacrifice_permanents"] += 1
+
     async def broadcast_delta(self, events: list[dict[str, Any]]) -> None:
+        self._count_progress(events)
         for viewer in (0, 1):
             payload = {"events": redact_events(events, viewer),
                        "state": snapshot_for(self.match, viewer)}
@@ -135,6 +176,37 @@ class MatchSession:
         finally:
             self.closed = True
             log.info("Match %s ended (winner=%s).", self.match_id, self.match.winner)
+            await self._settle_rewards()
+
+    async def _settle_rewards(self) -> None:
+        from server import economy
+        if not economy.enabled() or self.match.winner is None:
+            return
+        stats = getattr(self, "stats", [{}, {}])
+        for index, seat in enumerate(self.seats):
+            if seat.is_ai or not seat.uid:
+                continue
+            try:
+                await economy.add_progress(seat.uid, stats[index])
+                delta: dict[str, Any] = {}
+                if index == self.match.winner and not                         self.seats[1 - index].is_ai:
+                    win = await economy.record_win(seat.uid)
+                    if win.get("awarded"):
+                        delta["gold_awarded"] = win["awarded"]
+                        delta["win_number"] = win.get("wins")
+                wallet = await economy.wallet(seat.uid) or {}
+                completed = [d for d in wallet.get("dailies", [])
+                             if d.get("progress", 0) >= d.get("goal", 1)
+                             and not d.get("claimed")]
+                if completed:
+                    delta["challenges_completed"] = completed
+                if delta:
+                    delta["type"] = "rewards"
+                    await self._send_to(index, Envelope(
+                        type=MsgType.ECONOMY_DELTA.value, payload=delta,
+                        match_id=self.match_id))
+            except Exception:  # noqa: BLE001
+                log.exception("Reward settlement failed for seat %d", index)
 
     async def _advance(self) -> None:
         self.match.advance_phase()
@@ -182,6 +254,9 @@ class MatchSession:
                 await asyncio.sleep(AI_PLAY_DELAY)
                 card, target = choice
                 ok, reason, events = self.match.play_card(1, card.uid, target)
+                if not ok:
+                    log.warning("AI play rejected (%s) — ending main.", reason)
+                    break
             else:
                 choice = self.ai.choose_attack(self.match)
                 if choice is None:
@@ -189,6 +264,10 @@ class MatchSession:
                 await asyncio.sleep(AI_ATTACK_DELAY)
                 attacker, target_uid = choice
                 ok, reason, events = self.match.attack(1, attacker.uid, target_uid)
+                if not ok:
+                    log.warning("AI attack rejected (%s) — ending combat.",
+                                reason)
+                    break
             if not ok:
                 log.warning("Server AI intent rejected: %s", reason)
                 break

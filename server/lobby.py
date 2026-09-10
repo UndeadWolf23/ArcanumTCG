@@ -87,7 +87,8 @@ class Lobby:
     # ------------------------------------------------------------ sessions
     async def _start_ai(self, conn: Any) -> None:
         seats = [Seat(conn.name, conn.send,
-                      deck=getattr(conn, "deck", None)),
+                      deck=getattr(conn, "deck", None),
+                      uid=getattr(conn, "uid", "")),
                  Seat("Umbral Adept", None)]
         session = MatchSession(seats)
         conn.session, conn.seat_index = session, 0
@@ -102,9 +103,11 @@ class Lobby:
         pair = [a, b]
         self.rng.shuffle(pair)               # random first player
         seats = [Seat(pair[0].name, pair[0].send,
-                      deck=getattr(pair[0], "deck", None)),
+                      deck=getattr(pair[0], "deck", None),
+                      uid=getattr(pair[0], "uid", "")),
                  Seat(pair[1].name, pair[1].send,
-                      deck=getattr(pair[1], "deck", None))]
+                      deck=getattr(pair[1], "deck", None),
+                      uid=getattr(pair[1], "uid", ""))]
         session = MatchSession(seats)
         for index, conn in enumerate(pair):
             conn.session, conn.seat_index = session, index
