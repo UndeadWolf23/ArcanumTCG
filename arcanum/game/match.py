@@ -331,20 +331,20 @@ class MatchState:
             creature.exhausted = False
             creature.sick = False
             creature.thorns_used = False
+        self.pending_turn_events: list[Event] = []
         for barrier in player.barriers:
             barrier.ward_used = False
             barrier.aegis_used = False
-        for relic in player.relics:
-            relic.ward_used = False
             regen = barrier.kw_value("regenerate", 0) \
                 if barrier.has_kw("regenerate") else 0
-            if regen:
+            if regen and barrier.health < barrier.max_health:
                 barrier.health = min(barrier.max_health,
                                      barrier.health + regen)
                 self.pending_turn_events.append(
                     {"type": "heal", "player": index, "uid": barrier.uid,
                      "amount": regen, "health": barrier.health})
-        self.pending_turn_events: list[Event] = []
+        for relic in player.relics:
+            relic.ward_used = False
         self.upkeep_triggers(self.pending_turn_events)
 
     # ------------------------------------------------------------ phases
@@ -1282,6 +1282,9 @@ class MatchState:
         targets = self.valid_attack_targets(index, attacker)
         target = next((t for t in targets if t.uid == target_uid), None)
         if target is None:
+            if attacker.has_kw("umbral"):
+                return False, ("Their Umbral and Veil Pierce heroes "
+                               "intercept — fight them first."), []
             if enemy.barriers:
                 return False, "Their barriers must be broken first.", []
             if enemy.board and enemy.champion and target_uid == enemy.champion.uid:

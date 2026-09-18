@@ -199,7 +199,12 @@ class LocalController(MatchController):
             self._advance()
             return
         card, target = choice
-        ok, reason, events = self.state.play_card(1, card.uid, target)
+        try:
+            ok, reason, events = self.state.play_card(1, card.uid, target)
+        except Exception:  # noqa: BLE001
+            log.exception("Local AI play crashed; advancing.")
+            self._advance()
+            return
         if not ok:
             log.warning("Local AI play rejected: %s", reason)
             self._advance()
@@ -215,7 +220,13 @@ class LocalController(MatchController):
             self._advance()
             return
         attacker, target_uid = choice
-        ok, reason, events = self.state.attack(1, attacker.uid, target_uid)
+        try:
+            ok, reason, events = self.state.attack(1, attacker.uid,
+                                                   target_uid)
+        except Exception:  # noqa: BLE001
+            log.exception("Local AI attack crashed; advancing.")
+            self._advance()
+            return
         if not ok:
             log.warning("Local AI attack rejected: %s", reason)
             self._advance()

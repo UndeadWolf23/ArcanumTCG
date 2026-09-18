@@ -126,6 +126,8 @@ class CardSprite:
         self.lunge_vec = (dx / dist * reach, dy / dist * reach)
         self.lunge = Tween(0.0, 1.0, 0.50)
 
+    flash: float = 0.0
+
     def start_die(self) -> None:
         """Dissolve: fade + drift upward + gentle shrink."""
         self.dying = True
@@ -133,6 +135,7 @@ class CardSprite:
         self.ty -= 26
 
     def update(self, dt: float) -> None:
+        self.flash = max(0.0, self.flash - dt * 4.5)
         for name in ("spawn", "drop", "lunge"):
             tween = getattr(self, name)
             if tween is not None:
@@ -178,6 +181,7 @@ class FloatText:
         self.x, self.y = float(pos[0]), float(pos[1])
         self.color = color
         self.life = 1.0
+        self.scale = 1.0
 
     def update(self, dt: float) -> None:
         self.life -= dt * 1.1
@@ -218,6 +222,13 @@ class MatchScene(Scene):
         self.pending_spell: Optional[CardSprite] = None    # staged, awaiting target
         self.attack_source: Optional[CardSprite] = None    # combat arrow origin
         self.pending_ability: Optional[tuple[int, str]] = None
+        self.particles: list[dict] = []
+        self._shake = 0.0
+        self._shake_buf: Optional[pygame.Surface] = None
+        self._banner_text = ""
+        self._banner_sub = ""
+        self._banner_t = 99.0
+        self._impacts: list[dict] = []      # scheduled lunge apex payloads
         self._void_open = False
         self._void_rects: list[tuple[int, pygame.Rect]] = []
         self._auto_key = None          # (turn, phase) already auto-checked
@@ -353,6 +364,25 @@ class MatchScene(Scene):
         self._auto_advance(dt)
         self._pulse_end_turn = max(0.0, getattr(self, "_pulse_end_turn", 0)
                                    - dt)
+        self._banner_t += dt
+        self._shake = max(0.0, self._shake - dt * 26.0)
+        for hit in self._impacts:
+            hit["t"] -= dt
+            if hit["t"] <= 0:
+                power = hit.get("power", 2) or 2
+                self._kick(2.0 + min(5.0, power * 0.8))
+                self._burst(hit["pos"], (255, 210, 120),
+                            count=10 + power * 2, speed=260)
+                sprite = hit.get("sprite")
+                if sprite is not None:
+                    sprite.flash = max(sprite.flash, 0.25)
+        self._impacts = [h for h in self._impacts if h["t"] > 0]
+        for spark in self.particles:
+            spark["life"] -= dt
+            spark["vy"] += spark["g"] * dt
+            spark["x"] += spark["vx"] * dt
+            spark["y"] += spark["vy"] * dt
+        self.particles = [s for s in self.particles if s["life"] > 0]
         for event in self.controller.poll_events():
             try:
                 self._on_controller_event(event)
@@ -395,6 +425,10 @@ class MatchScene(Scene):
         self.floats.append(FloatText(label, pos, color))
 
     def _on_charge_event(self, event: dict) -> None:
+        lit = self._sprite_for(event.get("player", 0), event.get("uid", -1))
+        if lit is not None:
+            self._burst((lit.x, lit.y - 18), (255, 220, 120), count=6,
+                        speed=120, size=2.6, gravity=60, life=0.5)
         sprite = self._sprite_for(int(event.get("player", 0)),
                                   int(event.get("uid", -1)))
         if sprite is None:
@@ -427,6 +461,44 @@ class MatchScene(Scene):
         self._place_played_sprite(sprite, owner)
         self.floats.append(FloatText("SUMMONED", (sprite.x, sprite.y - 30),
                                      theme.GOLD_BRIGHT))
+
+    # ------------------------------------------------------------ particles
+    MAX_PARTICLES = 380
+
+    def _burst(self, pos, color, count=14, speed=240, size=4.0,
+               gravity=420.0, life=0.55) -> None:
+        import random as _r
+        room = self.MAX_PARTICLES - len(self.particles)
+        for _ in range(max(0, min(count, room))):
+            angle = _r.uniform(0, math.tau)
+            velocity = _r.uniform(speed * 0.35, speed)
+            self.particles.append({
+                "x": pos[0], "y": pos[1],
+                "vx": math.cos(angle) * velocity,
+                "vy": math.sin(angle) * velocity - speed * 0.25,
+                "size": _r.uniform(size * 0.6, size * 1.4),
+                "color": color, "g": gravity,
+                "life": _r.uniform(life * 0.7, life * 1.3), "max": life})
+
+    def _wisps(self, pos, count=10) -> None:
+        import random as _r
+        room = self.MAX_PARTICLES - len(self.particles)
+        for _ in range(max(0, min(count, room))):
+            self.particles.append({
+                "x": pos[0] + _r.uniform(-26, 26),
+                "y": pos[1] + _r.uniform(-20, 20),
+                "vx": _r.uniform(-14, 14), "vy": _r.uniform(-90, -40),
+                "size": _r.uniform(2.0, 4.5),
+                "color": (170, 150, 255), "g": -60.0,
+                "life": _r.uniform(0.8, 1.4), "max": 1.2})
+
+    def _kick(self, amount: float) -> None:
+        self._shake = min(14.0, self._shake + amount)
+
+    def _show_banner(self, text: str, sub: str = "") -> None:
+        self._banner_text = text
+        self._banner_sub = sub
+        self._banner_t = 0.0
 
     def _on_controller_event(self, event: dict) -> None:
         etype = event.get("type")
@@ -487,6 +559,17 @@ class MatchScene(Scene):
             self._schedule(0.10 * i, lambda c=card: self._spawn_hand_sprite(c))
 
     def _on_phase_event(self, event: dict) -> None:
+        new_active = event.get("active")
+        prior = getattr(self, "_seen_active", None)
+        if new_active is not None and new_active != prior:
+            self._seen_active = new_active
+            if event.get("turn", 1) > 1 or prior is not None:
+                if new_active == 0:
+                    self._show_banner("YOUR TURN", "seize the sky")
+                else:
+                    self._show_banner("ENEMY TURN", "")
+        if event.get("phase") == "combat" and event.get("active") == 0:
+            self._show_banner("COMBAT", "choose your strikes")
         your_turn = event.get("your_turn")
         if your_turn is None:                      # fall back to the mirror
             your_turn = self.match.is_local_turn()
@@ -540,17 +623,33 @@ class MatchScene(Scene):
         target = self._sprite_for(1 - owner, event["target"])
         if attacker is not None and target is not None:
             attacker.start_lunge((target.x, target.y))
+            heavy = self.controller.state is not None and \
+                event.get("attacker") is not None
+            self._impacts.append({"t": 0.25, "pos": (target.x, target.y),
+                                  "sprite": target,
+                                  "power": getattr(attacker.card, "attack",
+                                                   2)})
             self.app.audio.ui_sound("attack")
 
     def _on_damage_event(self, event: dict) -> None:
         sprite = self._sprite_for(event["player"], event["uid"])
-        if sprite is not None:
-            self.floats.append(FloatText(f"-{event['amount']}",
-                                         (sprite.x, sprite.y - 30), HEALTH_RED))
+        amount = int(event.get("amount", 0) or 0)
+        if sprite is None:
+            return
+        text = FloatText(f"-{amount}", (sprite.x, sprite.y - 30), HEALTH_RED)
+        text.scale = min(2.0, 1.0 + amount * 0.14)
+        self.floats.append(text)
+        sprite.flash = 0.22
+        if sprite.card.kind is Kind.CHAMPION:
+            self._kick(3.0 + min(6.0, amount))
+            self._burst((sprite.x, sprite.y), HEALTH_RED,
+                        count=8 + amount * 2, speed=200)
 
     # ------------------------------------------------------------ event fx
     def _place_played_sprite(self, sprite: CardSprite, owner: int) -> None:
         sprite.start_drop()
+        self._burst((sprite.x, sprite.y + 24), theme.GOLD_DIM, count=8,
+                    speed=120, size=2.6, gravity=-30, life=0.45)
         if sprite.card.kind is Kind.BARRIER:
             group = self.barriers if owner == 0 else self.opp_barriers
             group.append(sprite)
@@ -654,8 +753,8 @@ class MatchScene(Scene):
             self._show_toast("No actions available — to combat.")
             self.controller.pass_phase()
         elif state.phase is Phase.COMBAT and not state.has_combat_actions(0):
-            self._show_toast("No attacks available.")
-            self._pulse_end_turn = 2.5
+            self._show_toast("No attacks available — ending combat.")
+            self.controller.pass_phase()
 
     def _rebind_sprites(self) -> None:
         """Point every sprite at the controller's live card instance so
@@ -694,6 +793,9 @@ class MatchScene(Scene):
         return next((s for s in pools if s.card.uid == uid), None)
 
     def _kill_sprite(self, owner: int, uid: int) -> None:
+        marked = self._sprite_for(owner, uid)
+        if marked is not None and not marked.dying:
+            self._wisps((marked.x, marked.y))
         rows = [self.board if owner == 0 else self.opp_board,
                 self.barriers if owner == 0 else self.opp_barriers,
                 self.relics if owner == 0 else self.opp_relics]
@@ -713,6 +815,15 @@ class MatchScene(Scene):
             self._pinned = None
 
     def _finish(self, winner: int) -> None:
+        w, h = self.app.screen.get_size()
+        if winner == 0:
+            self._kick(8.0)
+            for _ in range(4):
+                self._burst((w * 0.5, h * 0.4), theme.GOLD_BRIGHT, count=26,
+                            speed=460, size=4.6, gravity=300, life=1.1)
+            self._show_banner("VICTORY", "the sky is yours")
+        else:
+            self._show_banner("DEFEAT", "the stars fall silent")
         self.result = "victory" if winner == 0 else "defeat"
         self._flow_busy = True
         self._cancel_stage()
@@ -1124,6 +1235,20 @@ class MatchScene(Scene):
 
     # ------------------------------------------------------------ drawing
     def draw(self, surface: pygame.Surface) -> None:
+        if self._shake > 0.4:
+            if self._shake_buf is None or \
+                    self._shake_buf.get_size() != surface.get_size():
+                self._shake_buf = pygame.Surface(surface.get_size())
+            self._draw_world(self._shake_buf)
+            import random as _r
+            jitter = self._shake
+            surface.blit(self._shake_buf,
+                         (_r.uniform(-jitter, jitter),
+                          _r.uniform(-jitter, jitter)))
+        else:
+            self._draw_world(surface)
+
+    def _draw_world(self, surface: pygame.Surface) -> None:
         self.app.background.draw(surface)
         self._draw_zone_hints(surface)
         self._draw_opponent(surface)
@@ -1171,7 +1296,9 @@ class MatchScene(Scene):
         self._draw_card_overlays(surface)
         self._draw_floats(surface)
         self._draw_preview(surface)
+        self._draw_particles(surface)
         self._draw_void(surface)
+        self._draw_banner(surface)
         self._draw_toast(surface)
         if self._confirm_leave:
             dw, dh = surface.get_size()
@@ -1502,9 +1629,10 @@ class MatchScene(Scene):
 
     def _draw_floats(self, surface: pygame.Surface) -> None:
         for ft in self.floats:
-            alpha = int(255 * min(1.0, ft.life / 0.7))
+            alpha = int(255 * max(0.0, min(1.0, ft.life * 1.4)))
+            size = int(20 * self.ui_scale * getattr(ft, "scale", 1.0))
             theme.draw_text(surface, ft.text, (int(ft.x), int(ft.y)),
-                            theme.body_font(22, bold=True), ft.color,
+                            theme.body_font(size, bold=True), ft.color,
                             anchor="center", alpha=alpha)
 
     # -- preview ---------------------------------------------------------------
@@ -1818,6 +1946,43 @@ class MatchScene(Scene):
                              rect.bottom - int(10 * s)),
                             theme.body_font(int(13 * s), bold=True),
                             theme.TEXT_DIM, anchor="bottomright")
+
+    def _draw_particles(self, surface: pygame.Surface) -> None:
+        for spark in self.particles:
+            k = max(0.0, spark["life"] / spark["max"])
+            size = max(1, int(spark["size"] * k))
+            pygame.draw.circle(surface, spark["color"],
+                               (int(spark["x"]), int(spark["y"])), size)
+
+    def _draw_banner(self, surface: pygame.Surface) -> None:
+        t = self._banner_t
+        if t > 1.9 or not self._banner_text:
+            return
+        w, h = surface.get_size()
+        appear = min(1.0, t * 5.0)
+        vanish = min(1.0, max(0.0, (1.9 - t) / 0.35))
+        alpha = int(255 * min(appear, vanish))
+        slide = (1 - appear) ** 2 * 120
+        mine = self._banner_text == "YOUR TURN" or \
+            self._banner_text == "COMBAT"
+        color = theme.GOLD_BRIGHT if mine else (170, 180, 210)
+        band = pygame.Rect(0, int(h * 0.30), w, int(92 * self.ui_scale))
+        veil = pygame.Surface((w, band.height), pygame.SRCALPHA)
+        for x in range(0, w, 8):                      # feathered band
+            edge = 1 - abs(x - w / 2) / (w / 2)
+            veil.fill((8, 12, 28, int(alpha * 0.75 * min(1.0, edge * 2.4))),
+                      (x, 0, 8, band.height))
+        surface.blit(veil, band.topleft)
+        theme.draw_text(surface, self._banner_text,
+                        (w // 2 - slide, band.centery - int(8 * self.ui_scale)),
+                        theme.display_font(int(44 * self.ui_scale)), color,
+                        anchor="center", alpha=alpha)
+        if self._banner_sub:
+            theme.draw_text(surface, self._banner_sub,
+                            (w // 2 + slide, band.centery +
+                             int(30 * self.ui_scale)),
+                            theme.body_font(int(15 * self.ui_scale)),
+                            theme.TEXT_DIM, anchor="center", alpha=alpha)
 
     def _draw_toast(self, surface: pygame.Surface) -> None:
         if self._toast_timer <= 0 or not self._toast:

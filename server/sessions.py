@@ -103,6 +103,12 @@ class MatchSession:
             seat.connected = False
 
     def _count_progress(self, events: list[dict[str, Any]]) -> None:
+        try:
+            self._count_progress_inner(events)
+        except Exception:  # noqa: BLE001 — stats must never stall a match
+            log.exception("Progress counting failed; continuing match.")
+
+    def _count_progress_inner(self, events: list[dict[str, Any]]) -> None:
         stats = getattr(self, "stats", None)
         if stats is None:
             stats = self.stats = [
@@ -234,7 +240,16 @@ class MatchSession:
             await self.broadcast_delta(events)
         elif phase in (Phase.MAIN, Phase.COMBAT):
             if seat.is_ai:
-                await self._ai_phase(phase)
+                try:
+                    await asyncio.wait_for(self._ai_phase(phase), timeout=25)
+                except asyncio.TimeoutError:
+                    log.error("AI phase %s watchdog fired — forcing "
+                              "advance.", phase)
+                except Exception:  # noqa: BLE001
+                    log.exception("AI phase crashed — forcing advance.")
+                if self.match.phase is phase and self.match.winner is None \
+                        and not self.closed:
+                    await self._advance()
             else:
                 # the pass intent itself performs the advance (handler below),
                 # then wakes this pump to evaluate the next phase
