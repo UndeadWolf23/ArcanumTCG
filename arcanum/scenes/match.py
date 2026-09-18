@@ -238,6 +238,8 @@ class MatchScene(Scene):
         self.pending_spell: Optional[CardSprite] = None    # staged, awaiting target
         self.attack_source: Optional[CardSprite] = None    # combat arrow origin
         self.pending_ability: Optional[tuple[int, str]] = None
+        self._quiet = 0.0
+        self._reconcile_timer = 0.0
         self._stack_open = {0: False, 1: False}
         self._stack_scroll = {0: 0.0, 1: 0.0}
         self.particles: list[dict] = []
@@ -383,6 +385,7 @@ class MatchScene(Scene):
         self._pulse_end_turn = max(0.0, getattr(self, "_pulse_end_turn", 0)
                                    - dt)
         self._banner_t += dt
+        self._quiet += dt
         self._shake = max(0.0, self._shake - dt * 26.0)
         for hit in self._impacts:
             hit["t"] -= dt
@@ -474,6 +477,10 @@ class MatchScene(Scene):
         card = card_from_dict(data)
         owner = int(event.get("player", 0))
         source = self.deck_pos if owner == 0 else (80, 60)
+        if self._uid_sprited(card.uid):
+            log.warning("Duplicate 'spawn' for uid=%s (%s); ignoring.",
+                        card.uid, card.name)
+            return
         sprite = CardSprite(card, source)
         sprite.start_drop()
         self._place_played_sprite(sprite, owner)
@@ -519,6 +526,7 @@ class MatchScene(Scene):
         self._banner_t = 0.0
 
     def _on_controller_event(self, event: dict) -> None:
+        self._quiet = 0.0
         etype = event.get("type")
         if etype == "match_start":
             self._on_match_start()
@@ -641,6 +649,10 @@ class MatchScene(Scene):
         if data is None:
             return
         card = card_from_dict(data)
+        if self._uid_sprited(card.uid):
+            log.warning("Duplicate 'played' for uid=%s (%s); ignoring.",
+                        card.uid, card.name)
+            return
         self.opp_hand_count = self.controller.opp_hand_count
         w = self.app.screen.get_width()
         origin = ((self.opp_void_chip.centerx, self.opp_void_chip.bottom)
@@ -811,6 +823,21 @@ class MatchScene(Scene):
                 fresh = live.get(sprite.card.uid)
                 if fresh is not None and fresh is not sprite.card:
                     sprite.card = fresh
+        for zone_name, group in (("board", self.board),
+                                 ("opp_board", self.opp_board),
+                                 ("barriers", self.barriers),
+                                 ("opp_barriers", self.opp_barriers),
+                                 ("relics", self.relics),
+                                 ("opp_relics", self.opp_relics)):
+            seen: set[int] = set()
+            for sprite in list(group):
+                if sprite.card.uid in seen:
+                    log.warning("Dedupe: removing duplicate %s (uid=%s) "
+                                "from %s.", sprite.card.name,
+                                sprite.card.uid, zone_name)
+                    group.remove(sprite)
+                else:
+                    seen.add(sprite.card.uid)
         zone_map = (
             (state.player(0).board, self.board, 0),
             (state.player(1).board, self.opp_board, 1),
@@ -819,21 +846,35 @@ class MatchScene(Scene):
             (state.player(0).relics, self.relics, 0),
             (state.player(1).relics, self.opp_relics, 1),
         )
-        leaving = {s.card.uid for s in self.effects}
+        # LAST-RESORT reconciler: only judge once the table is QUIET —
+        # ~0.9s with no events and no flow animation — so it can never race
+        # the paced event queue (which is what made barriers flicker).
+        self._reconcile_timer += 1 / 60
+        if self._flow_busy or self._quiet < 0.9 \
+                or self._reconcile_timer < 0.5:
+            return
+        self._reconcile_timer = 0.0
+        everywhere = set(live)                    # every uid in the mirror
+        for side in state.players:
+            for card in side.void:
+                everywhere.add(card.uid)
+        sprite_uids = {s.card.uid for group in
+                       (self.board, self.opp_board, self.barriers,
+                        self.opp_barriers, self.relics, self.opp_relics,
+                        self.hand, self.effects)
+                       for s in group}
         for cards, sprites, owner in zone_map:
-            wanted = {c.uid for c in cards}
-            # prune ghosts: settled sprites whose card left this zone
             for sprite in list(sprites):
-                if sprite.card.uid not in wanted and not sprite.dying \
-                        and sprite.age > 1.2:
+                if sprite.card.uid not in everywhere and not sprite.dying \
+                        and sprite.age > 2.0:
                     log.warning("Reconciler: pruning ghost sprite %s.",
                                 sprite.card.name)
                     sprites.remove(sprite)
-            known = {s.card.uid for s in sprites} | leaving
             for card in cards:
-                if card.uid not in known:
+                if card.uid not in sprite_uids:
                     log.warning("Reconciler: %s had no sprite; creating.",
                                 card.name)
+                    sprite_uids.add(card.uid)
                     ghost = CardSprite(card, (self.app.screen.get_width()
                                               // 2, -60))
                     self._place_played_sprite(ghost, owner=owner)
@@ -860,15 +901,23 @@ class MatchScene(Scene):
         rows = [self.board if owner == 0 else self.opp_board,
                 self.barriers if owner == 0 else self.opp_barriers,
                 self.relics if owner == 0 else self.opp_relics]
-        sprite, row = None, None
+        victims: list[tuple[CardSprite, list]] = []
         for candidate in rows:
-            sprite = next((s for s in candidate if s.card.uid == uid), None)
-            if sprite is not None:
-                row = candidate
-                break
-        if sprite is None:
+            for s in list(candidate):
+                if s.card.uid == uid:
+                    victims.append((s, candidate))
+        if not victims:
+            if any(s.card.uid == uid for s in self.effects):
+                return                      # already dissolving: benign
             log.warning("death event for unknown sprite uid=%s", uid)
             return
+        if len(victims) > 1:
+            log.warning("Death found %d sprites for uid=%s (%s) — "
+                        "duplication source upstream!", len(victims), uid,
+                        victims[0][0].card.name)
+        for extra, extra_row in victims[1:]:
+            extra_row.remove(extra)
+        sprite, row = victims[0]
         row.remove(sprite)
         sprite.start_die()
         self.effects.append(sprite)
@@ -1036,6 +1085,13 @@ class MatchScene(Scene):
         if sprite in self.hand or sprite is self.pending_spell:
             return self.card_size
         return self.board_card_size
+
+    def _uid_sprited(self, uid: int) -> bool:
+        return any(s.card.uid == uid for group in
+                   (self.board, self.opp_board, self.barriers,
+                    self.opp_barriers, self.relics, self.opp_relics,
+                    self.hand, self.effects)
+                   for s in group)
 
     def _sprite_interactive(self, sprite: CardSprite) -> bool:
         if not sprite.card.is_token:
