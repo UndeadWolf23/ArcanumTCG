@@ -419,8 +419,10 @@ class MatchState:
             return False, f"Not enough mana ({player.mana}/{cost})."
         if card.kind is Kind.BARRIER and len(player.barriers) >= BARRIER_LIMIT:
             return False, f"Barrier slots are full ({BARRIER_LIMIT} max)."
-        if card.kind is Kind.CREATURE and len(player.board) >= CREATURE_LIMIT:
-            return False, f"Creature row is full ({CREATURE_LIMIT} max)."
+        if card.kind is Kind.CREATURE and \
+                sum(1 for c in player.board
+                    if not c.is_token) >= CREATURE_LIMIT:
+            return False, f"Hero row is full ({CREATURE_LIMIT} heroes max)."
         if card.kind is Kind.RELIC and len(player.relics) >= RELIC_LIMIT:
             return False, f"Relic slots are full ({RELIC_LIMIT} max)."
         if card.kind is Kind.CHAMPION:
@@ -780,7 +782,7 @@ class MatchState:
     def _spawn_token(self, owner: int, name: str, atk: int, hp: int,
                      events: list) -> None:
         side = self.players[owner]
-        if len(side.board) >= CREATURE_LIMIT or hp < 1:
+        if hp < 1:                     # minions never hit the hero cap
             return
         token = CardInstance(self._uid(), name, Kind.CREATURE, 0,
                              attack=max(0, atk), health=hp, max_health=hp,

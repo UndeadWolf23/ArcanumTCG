@@ -127,6 +127,7 @@ class CardSprite:
         self.lunge = Tween(0.0, 1.0, 0.50)
 
     flash: float = 0.0
+    age: float = 0.0
 
     def start_rise(self) -> None:
         """Reanimation: claw up from beneath the final resting position."""
@@ -142,6 +143,7 @@ class CardSprite:
 
     def update(self, dt: float) -> None:
         self.flash = max(0.0, self.flash - dt * 4.5)
+        self.age += dt
         rise = getattr(self, "rise", None)
         if rise is not None:
             rise.update(dt)
@@ -236,6 +238,8 @@ class MatchScene(Scene):
         self.pending_spell: Optional[CardSprite] = None    # staged, awaiting target
         self.attack_source: Optional[CardSprite] = None    # combat arrow origin
         self.pending_ability: Optional[tuple[int, str]] = None
+        self._stack_open = {0: False, 1: False}
+        self._stack_scroll = {0: 0.0, 1: 0.0}
         self.particles: list[dict] = []
         self._shake = 0.0
         self._shake_buf: Optional[pygame.Surface] = None
@@ -815,8 +819,17 @@ class MatchScene(Scene):
             (state.player(0).relics, self.relics, 0),
             (state.player(1).relics, self.opp_relics, 1),
         )
+        leaving = {s.card.uid for s in self.effects}
         for cards, sprites, owner in zone_map:
-            known = {s.card.uid for s in sprites}
+            wanted = {c.uid for c in cards}
+            # prune ghosts: settled sprites whose card left this zone
+            for sprite in list(sprites):
+                if sprite.card.uid not in wanted and not sprite.dying \
+                        and sprite.age > 1.2:
+                    log.warning("Reconciler: pruning ghost sprite %s.",
+                                sprite.card.name)
+                    sprites.remove(sprite)
+            known = {s.card.uid for s in sprites} | leaving
             for card in cards:
                 if card.uid not in known:
                     log.warning("Reconciler: %s had no sprite; creating.",
@@ -966,25 +979,37 @@ class MatchScene(Scene):
     def _spell_target_under(self, pos: tuple[int, int],
                             card: CardInstance) -> Optional[CardSprite]:
         legal = {c.uid for c in self.match.valid_targets(0, card)}
-        for sprite in reversed(self.opp_board):
-            if sprite.card.uid in legal and \
-                    sprite.rect(self.board_card_size).collidepoint(pos):
-                return sprite
-        return None
+        best, best_d = None, 1e9
+        for sprite in self.opp_board:
+            if not self._sprite_interactive(sprite):
+                continue
+            rect = sprite.rect(self.board_card_size)
+            if sprite.card.uid in legal and rect.collidepoint(pos):
+                d = (rect.centerx - pos[0]) ** 2 + \
+                    (rect.centery - pos[1]) ** 2
+                if d < best_d:
+                    best, best_d = sprite, d
+        return best
 
     def _attack_target_under(self, pos: tuple[int, int]) -> Optional[CardSprite]:
         attacker_card = self.attack_source.card \
             if self.attack_source is not None else None
         legal = {c.uid for c in
                  self.match.valid_attack_targets(0, attacker_card)}
-        for sprite in reversed(self.opp_board):
-            if sprite.card.uid in legal and \
-                    sprite.rect(self.board_card_size).collidepoint(pos):
-                return sprite
-        for sprite in reversed(self.opp_barriers):
-            if sprite.card.uid in legal and \
-                    sprite.rect(self.barrier_size).collidepoint(pos):
-                return sprite
+        best, best_d = None, 1e9
+        for sprite, size in [(s, self.board_card_size)
+                             for s in self.opp_board] + \
+                [(s, self.barrier_size) for s in self.opp_barriers]:
+            if not self._sprite_interactive(sprite):
+                continue
+            rect = sprite.rect(size)
+            if sprite.card.uid in legal and rect.collidepoint(pos):
+                d = (rect.centerx - pos[0]) ** 2 + \
+                    (rect.centery - pos[1]) ** 2
+                if d < best_d:
+                    best, best_d = sprite, d
+        if best is not None:
+            return best
         champ = self.opp_champ
         if champ is not None and champ.card.uid in legal and \
                 champ.rect(self.champ_size).collidepoint(pos):
@@ -1012,11 +1037,25 @@ class MatchScene(Scene):
             return self.card_size
         return self.board_card_size
 
+    def _sprite_interactive(self, sprite: CardSprite) -> bool:
+        if not sprite.card.is_token:
+            return True
+        owner = 0 if sprite in self.board else 1
+        return self._stack_open[owner]
+
     def _field_sprite_under(self, pos: tuple[int, int]) -> Optional[CardSprite]:
-        for sprite in reversed(self._field_sprites()):
-            if sprite.rect(self._sprite_size(sprite)).collidepoint(pos):
-                return sprite
-        return None
+        """Among overlapping candidates, pick the one whose CENTER is
+        closest to the cursor — overlapped rows stay precisely clickable."""
+        best, best_d = None, 1e9
+        for sprite in self._field_sprites():
+            if not self._sprite_interactive(sprite):
+                continue
+            rect = sprite.rect(self._sprite_size(sprite))
+            if rect.collidepoint(pos):
+                d = (rect.centerx - pos[0]) ** 2 + (rect.centery - pos[1]) ** 2
+                if d < best_d:
+                    best, best_d = sprite, d
+        return best
 
     def _hand_sprite_under(self, pos: tuple[int, int]) -> Optional[CardSprite]:
         for sprite in reversed(self.hand):
@@ -1077,6 +1116,43 @@ class MatchScene(Scene):
                 self._cancel_stage()
             return
 
+        if event.type == pygame.MOUSEWHEEL:
+            mouse = pygame.mouse.get_pos()
+            for owner in (0, 1):
+                if self._stack_open[owner] and \
+                        self._strip_rect(owner).collidepoint(mouse):
+                    self._stack_scroll[owner] -= event.y * 60
+                    return
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            if self._stack_open[0] or self._stack_open[1]:
+                self._stack_open = {0: False, 1: False}
+                return
+            if self.pending_spell is not None:
+                self._cancel_stage()
+                self._show_toast("Spell returned to your hand.")
+                return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            for owner in (0, 1):
+                minions = self._minions_of(owner)
+                if not minions:
+                    continue
+                if not self._stack_open[owner] and \
+                        self._stack_rect(owner).collidepoint(event.pos):
+                    self._stack_open[owner] = True
+                    self._stack_open[1 - owner] = False
+                    return
+                if self._stack_open[owner]:
+                    strip = self._strip_rect(owner)
+                    if not strip.collidepoint(event.pos) and \
+                            not self._stack_rect(owner).collidepoint(
+                                event.pos):
+                        # clicked away: fold the strip, keep any targeting
+                        self._stack_open[owner] = False
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 3 \
+                and self.pending_spell is not None:
+            self._cancel_stage()
+            self._show_toast("Spell returned to your hand.")
+            return
         if self._void_open:
             if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 self._void_open = False
@@ -1096,12 +1172,21 @@ class MatchScene(Scene):
             self._void_open = True
             return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                and self.pending_spell is not None \
+                and self.pending_spell.rect(self.card_size).collidepoint(
+                    event.pos):
+            self._cancel_stage()
+            self._show_toast("Spell returned to your hand.")
+            return
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
                 and self.pending_ability is not None:
             uid, ability = self.pending_ability
             legal = {c.uid for c in
                      self.controller.state.valid_ability_targets(0, uid,
                                                                  ability)}
             for sprite in (*self.opp_board, *self.board):
+                if not self._sprite_interactive(sprite):
+                    continue
                 if sprite.card.uid in legal and \
                         sprite.rect(self.board_card_size).collidepoint(
                             event.pos):
@@ -1169,6 +1254,14 @@ class MatchScene(Scene):
                 self.attack_source = None
                 self._target_uid = None
                 target = self._attack_target_under(event.pos)
+                if target is None and not self._stack_open[1] and \
+                        self._minions_of(1) and \
+                        self._stack_rect(1).collidepoint(event.pos):
+                    self._stack_open[1] = True
+                    self.attack_source = attacker      # keep aiming
+                    self._show_toast("Pick a minion — or click away to "
+                                     "back out.")
+                    return
                 if target is None:
                     champ = self.opp_champ
                     if (champ is not None and self.match.player(1).board
@@ -1248,10 +1341,8 @@ class MatchScene(Scene):
             for i, sprite in enumerate(self.hand):
                 sprite.tx = start + i * spacing
                 sprite.ty = self.hand_y - (28 if sprite.hover and not sprite.dragging else 0)
-        self._row_targets(self.board, self.own_row_y, self.board_card_size,
-                          self.creature_span)
-        self._row_targets(self.opp_board, self.opp_row_y, self.board_card_size,
-                          self.creature_span)
+        self._board_targets(self.board, 0, self.own_row_y)
+        self._board_targets(self.opp_board, 1, self.opp_row_y)
         self._relic_targets(self.relics, self.relic_anchor)
         self._relic_targets(self.opp_relics, self.opp_relic_anchor)
         if self.champ is not None:
@@ -1260,6 +1351,54 @@ class MatchScene(Scene):
             self.opp_champ.tx, self.opp_champ.ty = self.opp_champ_pos
         if self.pending_spell is not None:
             self.pending_spell.tx, self.pending_spell.ty = self.stage_pos
+
+    def _minions_of(self, owner: int) -> list[CardSprite]:
+        group = self.board if owner == 0 else self.opp_board
+        return [s for s in group if s.card.is_token]
+
+    def _stack_rect(self, owner: int) -> pygame.Rect:
+        size = self.board_card_size
+        x0, x1 = self.creature_span
+        y = self.own_row_y if owner == 0 else self.opp_row_y
+        rect = pygame.Rect(0, 0, int(size[0] * 0.9), int(size[1] * 0.9))
+        rect.center = (x1 + int(size[0] * 0.75), y)
+        return rect
+
+    def _strip_rect(self, owner: int) -> pygame.Rect:
+        w, h = self.app.screen.get_size()
+        size = self.board_card_size
+        y = self.own_row_y if owner == 0 else self.opp_row_y
+        direction = 1 if owner == 0 else -1
+        rect = pygame.Rect(0, 0, int(w * 0.7), int(size[1] * 1.3))
+        rect.center = (w // 2, y + direction * int(size[1] * 1.15))
+        rect.clamp_ip(pygame.Rect(0, 0, w, h))
+        return rect
+
+    def _board_targets(self, sprites: list[CardSprite], owner: int,
+                       y: int) -> None:
+        size = self.board_card_size
+        heroes = [s for s in sprites if not s.card.is_token]
+        minions = [s for s in sprites if s.card.is_token]
+        self._row_targets(heroes, y, size, self.creature_span)
+        if not minions:
+            self._stack_open[owner] = False
+            return
+        if self._stack_open[owner]:
+            strip = self._strip_rect(owner)
+            spacing = int(size[0] * 0.78)
+            content = spacing * len(minions)
+            max_scroll = max(0, content - strip.width + spacing)
+            self._stack_scroll[owner] = max(
+                0.0, min(self._stack_scroll[owner], max_scroll))
+            start = strip.x + spacing // 2 - int(self._stack_scroll[owner])
+            for i, sprite in enumerate(minions):
+                sprite.tx = start + i * spacing
+                sprite.ty = strip.centery
+        else:
+            anchor = self._stack_rect(owner)
+            for i, sprite in enumerate(minions):
+                sprite.tx = anchor.centerx + min(i, 4) * 5
+                sprite.ty = anchor.centery - min(i, 4) * 5
 
     def _row_targets(self, sprites: list[CardSprite], y: int,
                      size: tuple[int, int], span: tuple[int, int]) -> None:
@@ -1318,13 +1457,18 @@ class MatchScene(Scene):
         for sprite in self.barriers:
             self._draw_card(surface, sprite, self.barrier_size, compact=True)
         for sprite in self.opp_board:
+            if sprite.card.is_token and not self._stack_open[1]:
+                continue                     # folded into the pile
             self._draw_card(surface, sprite, self.board_card_size,
                             targeted=(sprite.card.uid == self._target_uid))
         for sprite in self.board:
+            if sprite.card.is_token and not self._stack_open[0]:
+                continue
             ready = (self.match.is_local_turn()
                      and self.match.phase is Phase.COMBAT
                      and self.match.can_attack(0, sprite.card.uid)[0])
             self._draw_card(surface, sprite, self.board_card_size, playable=ready)
+        self._draw_minion_stacks(surface)
         for sprite in self.effects:
             self._draw_card(surface, sprite, self.board_card_size)
         for sprite in self.hand:
@@ -2031,6 +2175,73 @@ class MatchScene(Scene):
                              rect.bottom - int(10 * s)),
                             theme.body_font(int(13 * s), bold=True),
                             theme.TEXT_DIM, anchor="bottomright")
+
+    def _targeting_wants_minions(self, owner: int) -> bool:
+        """True when an active targeting mode could pick a minion inside
+        this owner's stack — the pile glows to invite expansion."""
+        minion_uids = {s.card.uid for s in self._minions_of(owner)}
+        if not minion_uids:
+            return False
+        if owner == 1 and self.attack_source is not None:
+            legal = self.match.valid_attack_targets(
+                0, self.attack_source.card)
+            return any(c.uid in minion_uids for c in legal)
+        if owner == 1 and self.pending_spell is not None:
+            legal = self.match.valid_targets(0, self.pending_spell.card)
+            return any(c.uid in minion_uids for c in legal)
+        if self.pending_ability is not None:
+            uid, ability = self.pending_ability
+            legal = self.match.valid_ability_targets(0, uid, ability)
+            return any(c.uid in minion_uids for c in legal)
+        return False
+
+    def _draw_minion_stacks(self, surface: pygame.Surface) -> None:
+        s = self.ui_scale
+        for owner in (0, 1):
+            minions = self._minions_of(owner)
+            if not minions:
+                continue
+            if self._stack_open[owner]:
+                strip = self._strip_rect(owner)
+                theme.draw_glow_rect(surface, strip, theme.GOLD, 0.25,
+                                     radius=14, spread=12)
+                theme.draw_panel(surface, strip, fill=theme.NAVY,
+                                 border=theme.GOLD_DIM, radius=14)
+                label = ("Your minions" if owner == 0
+                         else "Enemy minions")
+                theme.draw_text(surface,
+                                f"{label}  ·  {len(minions)}   "
+                                "(scroll · click away to close)",
+                                (strip.centerx, strip.y + int(12 * s)),
+                                theme.body_font(int(12 * s)),
+                                theme.TEXT_DIM, anchor="center")
+                clip = surface.get_clip()
+                surface.set_clip(strip.inflate(-8, -8))
+                for sprite in minions:
+                    targeted = sprite.card.uid == self._target_uid
+                    self._draw_card(surface, sprite, self.board_card_size,
+                                    targeted=targeted)
+                surface.set_clip(clip)
+                continue
+            pile = self._stack_rect(owner)
+            invite = self._targeting_wants_minions(owner)
+            if invite:
+                pulse = 0.45 + 0.3 * abs(math.sin(self._time * 3.4))
+                theme.draw_glow_rect(surface, pile, (90, 200, 255), pulse,
+                                     radius=12, spread=12)
+            for i in range(min(3, len(minions))):
+                back = pile.move(-i * 5, -i * 5)
+                theme.draw_panel(surface, back, fill=theme.NAVY_RAISED,
+                                 border=theme.GOLD_DIM if i == 0
+                                 else theme.NAVY_EDGE, radius=10)
+            theme.draw_text(surface, "MINIONS",
+                            (pile.centerx, pile.centery - int(10 * s)),
+                            theme.body_font(int(11 * s), bold=True),
+                            theme.TEXT_DIM, anchor="center")
+            theme.draw_text(surface, f"×{len(minions)}",
+                            (pile.centerx, pile.centery + int(12 * s)),
+                            theme.display_font(int(20 * s)),
+                            theme.GOLD_BRIGHT, anchor="center")
 
     def _draw_particles(self, surface: pygame.Surface) -> None:
         for spark in self.particles:
