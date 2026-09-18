@@ -316,8 +316,10 @@ class MatchScene(Scene):
         self.creature_span = (int(w * 0.27), int(w * 0.73))
         self.own_row_y = int(h * 0.585)
         self.opp_row_y = int(h * 0.295)
-        self.barrier_anchor = (int(w * 0.19), int(h * 0.585))
-        self.opp_barrier_anchor = (int(w * 0.19), int(h * 0.295))
+        # barriers form a FRONT LINE between each side's heroes and the
+        # center of the table — the wall stands in front of its army
+        self.own_barrier_y = int(h * 0.468)
+        self.opp_barrier_y = int(h * 0.408)
         self.barrier_size = (int(74 * s), int(103 * s))
         self.void_chip = pygame.Rect(w - int(150 * s), h - int(210 * s),
                                      int(120 * s), int(34 * s))
@@ -701,13 +703,8 @@ class MatchScene(Scene):
         self._burst((sprite.x, sprite.y + 24), theme.GOLD_DIM, count=8,
                     speed=120, size=2.6, gravity=-30, life=0.45)
         if sprite.card.kind is Kind.BARRIER:
-            group = self.barriers if owner == 0 else self.opp_barriers
-            group.append(sprite)
-            anchor = self.barrier_anchor if owner == 0 \
-                else self.opp_barrier_anchor
-            for i, b in enumerate(group):
-                b.tx = anchor[0] + i * int(self.barrier_size[0] * 1.12)
-                b.ty = anchor[1]
+            (self.barriers if owner == 0 else self.opp_barriers).append(
+                sprite)      # rows are laid out every frame in update
         elif sprite.card.kind is Kind.CREATURE:
             (self.board if owner == 0 else self.opp_board).append(sprite)
         elif sprite.card.kind is Kind.RELIC:
@@ -1476,6 +1473,10 @@ class MatchScene(Scene):
                 sprite.ty = self.hand_y - (28 if sprite.hover and not sprite.dragging else 0)
         self._board_targets(self.board, 0, self.own_row_y)
         self._board_targets(self.opp_board, 1, self.opp_row_y)
+        self._row_targets(self.barriers, self.own_barrier_y,
+                          self.barrier_size, self.creature_span)
+        self._row_targets(self.opp_barriers, self.opp_barrier_y,
+                          self.barrier_size, self.creature_span)
         self._relic_targets(self.relics, self.relic_anchor)
         self._relic_targets(self.opp_relics, self.opp_relic_anchor)
         if self.champ is not None:
@@ -2031,6 +2032,25 @@ class MatchScene(Scene):
                                      panel.bottom - int(11 * s)),
                                     theme.body_font(int(9 * s)),
                                     theme.TEXT_FAINT, anchor="center")
+        if self.attack_source is not None:
+            legal = {c.uid for c in self.match.valid_attack_targets(
+                0, self.attack_source.card)}
+            pulse = 0.35 + 0.3 * abs(math.sin(self._time * 3.2))
+            for sprite, size in ([(s, self.board_card_size)
+                                  for s in self.opp_board
+                                  if self._sprite_interactive(s)]
+                                 + [(s, self.barrier_size)
+                                    for s in self.opp_barriers]):
+                if sprite.card.uid in legal:
+                    theme.draw_glow_rect(surface, sprite.rect(size),
+                                         theme.GOLD_GLOW, pulse, radius=10,
+                                         spread=9)
+            if self.opp_champ is not None and \
+                    self.opp_champ.card.uid in legal:
+                theme.draw_glow_rect(surface,
+                                     self.opp_champ.rect(self.champ_size),
+                                     theme.GOLD_GLOW, pulse, radius=12,
+                                     spread=10)
         # ability targeting arrow
         if self.pending_ability is not None:
             uid, _ability = self.pending_ability
