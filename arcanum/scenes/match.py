@@ -318,9 +318,17 @@ class MatchScene(Scene):
         self.opp_row_y = int(h * 0.295)
         # barriers form a FRONT LINE between each side's heroes and the
         # center of the table — the wall stands in front of its army
-        self.own_barrier_y = int(h * 0.468)
-        self.opp_barrier_y = int(h * 0.408)
         self.barrier_size = (int(74 * s), int(103 * s))
+        self.barrier_row_y = int(h * 0.418)
+        gap = int(self.barrier_size[0] * 1.18)
+        # enemy field slots: left of center; yours: right of center
+        self.opp_field_slots = [(int(w * 0.44) - i * gap, self.barrier_row_y)
+                                for i in range(3)]
+        self.own_field_slots = [(int(w * 0.56) + i * gap, self.barrier_row_y)
+                                for i in range(3)]
+        # champion-guard slots: just right of each champion
+        self.opp_guard_slot = (int(w * 0.215), int(h * 0.275))
+        self.own_guard_slot = (int(w * 0.215), int(h * 0.585))
         self.void_chip = pygame.Rect(w - int(150 * s), h - int(210 * s),
                                      int(120 * s), int(34 * s))
         self.opp_void_chip = pygame.Rect(int(24 * s), int(96 * s),
@@ -864,7 +872,10 @@ class MatchScene(Scene):
                         self.app.screen.get_width() // 2, -60)), owner)
             for sprite in list(sprites):
                 if sprite.card.uid not in live_here and not sprite.dying:
-                    sprites.remove(sprite)
+                    sprites.remove(sprite)      # fell: dissolve in place
+                    self._wisps((sprite.x, sprite.y), count=8)
+                    sprite.start_die()
+                    self.effects.append(sprite)
 
         # LAST-RESORT reconciler: only judge once the table is QUIET —
         # ~0.9s with no events and no flow animation — so it can never race
@@ -1493,10 +1504,10 @@ class MatchScene(Scene):
                 sprite.ty = self.hand_y - (28 if sprite.hover and not sprite.dragging else 0)
         self._board_targets(self.board, 0, self.own_row_y)
         self._board_targets(self.opp_board, 1, self.opp_row_y)
-        self._row_targets(self.barriers, self.own_barrier_y,
-                          self.barrier_size, self.creature_span)
-        self._row_targets(self.opp_barriers, self.opp_barrier_y,
-                          self.barrier_size, self.creature_span)
+        self._barrier_targets(self.barriers, self.own_field_slots,
+                              self.own_guard_slot)
+        self._barrier_targets(self.opp_barriers, self.opp_field_slots,
+                              self.opp_guard_slot)
         self._relic_targets(self.relics, self.relic_anchor)
         self._relic_targets(self.opp_relics, self.opp_relic_anchor)
         if self.champ is not None:
@@ -1554,6 +1565,20 @@ class MatchScene(Scene):
                 sprite.tx = anchor.centerx + min(i, 4) * 5
                 sprite.ty = anchor.centery - min(i, 4) * 5
 
+    def _barrier_targets(self, sprites: list[CardSprite],
+                         field_slots: list[tuple[int, int]],
+                         guard_slot: tuple[int, int]) -> None:
+        """Field barriers fill their three slots in order; the champion's
+        guard takes the slot beside the champion."""
+        field_i = 0
+        for sprite in sprites:
+            if sprite.card.guard_champion:
+                sprite.tx, sprite.ty = guard_slot
+            else:
+                slot = field_slots[min(field_i, len(field_slots) - 1)]
+                sprite.tx, sprite.ty = slot
+                field_i += 1
+
     def _row_targets(self, sprites: list[CardSprite], y: int,
                      size: tuple[int, int], span: tuple[int, int]) -> None:
         n = len(sprites)
@@ -1606,6 +1631,7 @@ class MatchScene(Scene):
                             targeted=targeted)
         if self.champ is not None:
             self._draw_card(surface, self.champ, self.champ_size)
+        self._draw_barrier_slots(surface)
         for sprite in self.opp_barriers:
             self._draw_card(surface, sprite, self.barrier_size, compact=True)
         for sprite in self.barriers:
@@ -2466,6 +2492,29 @@ class MatchScene(Scene):
                             (pile.centerx, pile.centery + int(12 * s)),
                             theme.display_font(int(20 * s)),
                             theme.GOLD_BRIGHT, anchor="center")
+
+    def _draw_barrier_slots(self, surface: pygame.Surface) -> None:
+        """Dashed outlines for every barrier slot — filled or not — so the
+        wall zones read as real board geography."""
+        s = self.ui_scale
+        for slots, guard, color in (
+                (self.opp_field_slots, self.opp_guard_slot, (255, 120, 120)),
+                (self.own_field_slots, self.own_guard_slot, (120, 170, 255))):
+            for i, (x, y) in enumerate(slots + [guard]):
+                rect = pygame.Rect(0, 0, *self.barrier_size)
+                rect.center = (x, y)
+                veil = pygame.Surface(rect.size, pygame.SRCALPHA)
+                pygame.draw.rect(veil, (*color, 22), veil.get_rect(),
+                                 border_radius=int(10 * s))
+                pygame.draw.rect(veil, (*color, 70), veil.get_rect(),
+                                 width=1, border_radius=int(10 * s))
+                surface.blit(veil, rect.topleft)
+                label = "GUARD" if i == 3 else "WALL"
+                theme.draw_text(surface, label, rect.center,
+                                theme.body_font(max(8, int(9 * s)),
+                                                bold=True),
+                                (*color,), anchor="center",
+                                alpha=70)
 
     def _draw_particles(self, surface: pygame.Surface) -> None:
         for spark in self.particles:

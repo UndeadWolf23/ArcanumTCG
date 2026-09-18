@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 
 MAX_MANA = 12
 CREATURE_LIMIT = 6
-BARRIER_LIMIT = 4          # 1 champion barrier + up to 3 hero barriers
+BARRIER_LIMIT = 4            # 3 field + 1 champion guard
+FIELD_BARRIERS = 3          # 1 champion barrier + up to 3 hero barriers
 RELIC_LIMIT = 3
 HAND_LIMIT = 10
 STARTING_HAND = 7
@@ -102,6 +103,7 @@ class CardInstance:
     ward_used: bool = False     # Ward: first damage each turn prevented
     aegis_used: bool = False    # Aegis: first save each turn
     undying_spent: bool = False # Undying triggers once ever
+    guard_champion: bool = False  # barrier slot: True = champion's guard
 
     def add_charge(self, kind: str, amount: int = 1) -> int:
         self.charges[kind] = self.charges.get(kind, 0) + amount
@@ -458,6 +460,10 @@ class MatchState:
                        "from_void": from_void}]
 
         if card.kind is Kind.BARRIER:
+            # three field slots shield the army; the fourth barrier takes
+            # the champion-guard slot beside the champion
+            field = [b for b in player.barriers if not b.guard_champion]
+            card.guard_champion = len(field) >= FIELD_BARRIERS
             player.barriers.append(card)
         elif card.kind is Kind.RELIC and card.has_kw("countdown"):
             card.charges["countdown"] = card.kw_value("countdown", 3)
@@ -590,13 +596,20 @@ class MatchState:
             if interceptors:
                 return interceptors
             targets = list(enemy.board)
-            if enemy.champion is not None:
+            guard = [b for b in enemy.barriers if b.guard_champion]
+            if guard:
+                targets.extend(guard)        # must breach the champion's wall
+            elif enemy.champion is not None:
                 targets.append(enemy.champion)
             return targets
-        if enemy.barriers:
-            return list(enemy.barriers)
+        field = [b for b in enemy.barriers if not b.guard_champion]
+        guard = [b for b in enemy.barriers if b.guard_champion]
+        if field:
+            return field                 # the wall shields everything
         if enemy.board:
             return list(enemy.board)
+        if guard:
+            return guard                 # champion's own barrier last
         return [enemy.champion] if enemy.champion else []
     def _gain_energy(self, index: int, amount: int, events: list,
                      extra: bool = True) -> None:
@@ -1337,11 +1350,13 @@ class MatchState:
         if attacker.has_kw("umbral"):
             return ("Their Umbral and Veil Pierce heroes intercept — "
                     "fight them first.")
-        if enemy.barriers:
+        if any(not b.guard_champion for b in enemy.barriers):
             return "Their barriers must be broken first."
-        if enemy.champion is not None and target_uid == enemy.champion.uid \
-                and enemy.board:
-            return "Enemy heroes must be dealt with first."
+        if enemy.champion is not None and target_uid == enemy.champion.uid:
+            if enemy.board:
+                return "Enemy heroes must be dealt with first."
+            if any(b.guard_champion for b in enemy.barriers):
+                return "Their champion's barrier must be broken first."
         return "That isn't a legal attack target."
 
     def attack(self, index: int, attacker_uid: int,
