@@ -862,17 +862,25 @@ class MatchScene(Scene):
                 (state.player(1).barriers, self.opp_barriers, 1),
                 (state.player(0).relics, self.relics, 0),
                 (state.player(1).relics, self.opp_relics, 1)):
-            have = {s.card.uid for s in sprites}
             live_here = {c.uid for c in cards}
+            settled = {s.card.uid for group in
+                       (self.barriers, self.opp_barriers, self.relics,
+                        self.opp_relics)
+                       for s in group}          # dying corpses don't block
             for card in cards:
-                if card.uid not in have and not self._uid_sprited(card.uid):
-                    log.info("Structural sprite created immediately: %s",
-                             card.name)
+                if card.uid not in settled:
+                    log.info("Structural sprite created immediately: %s "
+                             "(owner %d)", card.name, owner)
                     self._place_played_sprite(CardSprite(card, (
                         self.app.screen.get_width() // 2, -60)), owner)
             for sprite in list(sprites):
-                if sprite.card.uid not in live_here and not sprite.dying:
-                    sprites.remove(sprite)      # fell: dissolve in place
+                # AGE GUARD: an optimistic intent-time placement must
+                # survive the server round-trip (mirror confirms within
+                # a second); only settled sprites can be judged fallen
+                if sprite.card.uid not in live_here and not sprite.dying \
+                        and sprite.age > 1.5:
+                    log.info("Structural sprite fell: %s", sprite.card.name)
+                    sprites.remove(sprite)
                     self._wisps((sprite.x, sprite.y), count=8)
                     sprite.start_die()
                     self.effects.append(sprite)
@@ -1465,7 +1473,8 @@ class MatchScene(Scene):
                              if not busy_pointer else None)
 
         everything = (self.hand + self.board + self.opp_board + self.relics
-                      + self.opp_relics + self.effects)
+                      + self.opp_relics + self.barriers + self.opp_barriers
+                      + self.effects)
         if self.pending_spell is not None:
             everything.append(self.pending_spell)
         if self.champ is not None:
