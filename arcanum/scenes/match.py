@@ -846,6 +846,26 @@ class MatchScene(Scene):
             (state.player(0).relics, self.relics, 0),
             (state.player(1).relics, self.opp_relics, 1),
         )
+        # STRUCTURAL permanents (barriers, relics) reconcile INSTANTLY —
+        # they have no paced animation to race, and an invisible barrier
+        # silently blocks every attack. Champions likewise.
+        for cards, sprites, owner in (
+                (state.player(0).barriers, self.barriers, 0),
+                (state.player(1).barriers, self.opp_barriers, 1),
+                (state.player(0).relics, self.relics, 0),
+                (state.player(1).relics, self.opp_relics, 1)):
+            have = {s.card.uid for s in sprites}
+            live_here = {c.uid for c in cards}
+            for card in cards:
+                if card.uid not in have and not self._uid_sprited(card.uid):
+                    log.info("Structural sprite created immediately: %s",
+                             card.name)
+                    self._place_played_sprite(CardSprite(card, (
+                        self.app.screen.get_width() // 2, -60)), owner)
+            for sprite in list(sprites):
+                if sprite.card.uid not in live_here and not sprite.dying:
+                    sprites.remove(sprite)
+
         # LAST-RESORT reconciler: only judge once the table is QUIET —
         # ~0.9s with no events and no flow animation — so it can never race
         # the paced event queue (which is what made barriers flicker).
