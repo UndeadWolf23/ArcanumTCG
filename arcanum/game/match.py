@@ -452,7 +452,8 @@ class MatchState:
         else:
             player.hand.remove(card)
             player.mana -= card.cost
-        events: list[Event] = [{"type": "played", "player": index, "card": card}]
+        events: list[Event] = [{"type": "played", "player": index, "card": card,
+                       "from_void": from_void}]
 
         if card.kind is Kind.BARRIER:
             player.barriers.append(card)
@@ -762,6 +763,7 @@ class MatchState:
                 self._resolve_item(item, events)
             except Exception:  # noqa: BLE001 - one bad effect can't end a match
                 log.exception("Stack item %s failed to resolve", item.effect)
+        self._cleanup_dead(events)
 
     def _buff(self, card: CardInstance, owner: int, atk: int, hp: int,
               events: list, temp: bool = False) -> None:
@@ -853,6 +855,22 @@ class MatchState:
         card.thorns_used = False
         card.charges = {}
         self.players[owner].void.append(card)
+
+    def _cleanup_dead(self, events: list) -> None:
+        """Safety sweep: no hero may linger on a board at 0 health. Kills
+        every 'invisible blocker' class of bug in one idempotent pass."""
+        for index, side in enumerate(self.players):
+            for card in list(side.board):
+                if card.health <= 0 and card in side.board:
+                    if self._resolve_state_based_death(index, card, events):
+                        continue
+        for index, side in enumerate(self.players):
+            for barrier in list(side.barriers):
+                if barrier.health <= 0:
+                    side.barriers.remove(barrier)
+                    events.append({"type": "death", "player": index,
+                                   "uid": barrier.uid})
+                    self._on_barrier_died(index, barrier, events)
 
     def _relicbound_up(self, index: int) -> bool:
         return any(h.has_kw("relicbound_hero")
@@ -1269,6 +1287,7 @@ class MatchState:
                                "health": target.health})
             events.append({"type": "keyword", "keyword": "purify",
                            "player": index, "uid": uid})
+        self._cleanup_dead(events)
         return True, "", events
 
     def attack(self, index: int, attacker_uid: int,
@@ -1445,6 +1464,7 @@ class MatchState:
         resolve_death(attacker)
 
         # champion defeat (Rebirth-aware) ends the match
+        self._cleanup_dead(events)
         self._check_champion_defeat(events)
         return True, "", events
 

@@ -128,6 +128,12 @@ class CardSprite:
 
     flash: float = 0.0
 
+    def start_rise(self) -> None:
+        """Reanimation: claw up from beneath the final resting position."""
+        self.y = self.ty + 78
+        self.x = self.tx
+        self.rise = Tween(0.0, 1.0, 0.75)
+
     def start_die(self) -> None:
         """Dissolve: fade + drift upward + gentle shrink."""
         self.dying = True
@@ -136,6 +142,14 @@ class CardSprite:
 
     def update(self, dt: float) -> None:
         self.flash = max(0.0, self.flash - dt * 4.5)
+        rise = getattr(self, "rise", None)
+        if rise is not None:
+            rise.update(dt)
+            k = rise.value
+            self.y = self.ty + 78 * (1 - k) ** 2
+            self.rise_alpha = k
+            if rise.done:
+                self.rise = None
         for name in ("spawn", "drop", "lunge"):
             tween = getattr(self, name)
             if tween is not None:
@@ -603,6 +617,18 @@ class MatchScene(Scene):
                                      *self.match.player(0).relics)
                          if c.uid == uid), None)
             if live is not None:
+                have = any(s.card.uid == uid for s in
+                           (*self.board, *self.relics, *self.barriers))
+                if not have:
+                    # not placed by a hand drag — e.g. REANIMATED from the
+                    # void: rise from the grave beneath the board
+                    sprite = CardSprite(live, (self.void_chip.centerx,
+                                               self.void_chip.y))
+                    self._place_played_sprite(sprite, owner=0)
+                    if event.get("from_void"):
+                        sprite.start_rise()
+                        self._wisps((sprite.tx, sprite.ty + 30), count=14)
+                    return
                 for sprite in (*self.board, *self.relics, *self.effects):
                     if sprite.card.uid == uid and sprite.card is not live:
                         sprite.card = live
@@ -613,8 +639,13 @@ class MatchScene(Scene):
         card = card_from_dict(data)
         self.opp_hand_count = self.controller.opp_hand_count
         w = self.app.screen.get_width()
-        sprite = CardSprite(card, (w // 2, -60))
+        origin = ((self.opp_void_chip.centerx, self.opp_void_chip.bottom)
+                  if event.get("from_void") else (w // 2, -60))
+        sprite = CardSprite(card, origin)
         self._place_played_sprite(sprite, owner=1)
+        if event.get("from_void"):
+            sprite.start_rise()
+            self._wisps((sprite.tx, sprite.ty + 30), count=14)
         self.app.audio.ui_sound("play")
 
     def _on_attack_event(self, event: dict) -> None:
@@ -776,6 +807,23 @@ class MatchScene(Scene):
                 fresh = live.get(sprite.card.uid)
                 if fresh is not None and fresh is not sprite.card:
                     sprite.card = fresh
+        zone_map = (
+            (state.player(0).board, self.board, 0),
+            (state.player(1).board, self.opp_board, 1),
+            (state.player(0).barriers, self.barriers, 0),
+            (state.player(1).barriers, self.opp_barriers, 1),
+            (state.player(0).relics, self.relics, 0),
+            (state.player(1).relics, self.opp_relics, 1),
+        )
+        for cards, sprites, owner in zone_map:
+            known = {s.card.uid for s in sprites}
+            for card in cards:
+                if card.uid not in known:
+                    log.warning("Reconciler: %s had no sprite; creating.",
+                                card.name)
+                    ghost = CardSprite(card, (self.app.screen.get_width()
+                                              // 2, -60))
+                    self._place_played_sprite(ghost, owner=owner)
         for sprite in (self.champ, self.opp_champ):
             if sprite is not None:
                 fresh = live.get(sprite.card.uid)
@@ -1429,8 +1477,12 @@ class MatchScene(Scene):
         card = sprite.card
         is_champ = card.kind is Kind.CHAMPION
         s = rect.width / 118
+        rising = getattr(sprite, "rise", None) is not None
         face = self._card_face(card, rect.size)
         if face is not None:
+            if rising:
+                face = face.copy()
+                face.set_alpha(int(255 * getattr(sprite, "rise_alpha", 1.0)))
             surface.blit(face, rect.topleft)
             border = (theme.GOLD if (playable or hover or targeted)
                       else None)
@@ -1488,17 +1540,25 @@ class MatchScene(Scene):
             except Exception:  # noqa: BLE001 - display must never crash
                 pass
             boosted = shown_attack > card.attack
-            chip_font = theme.body_font(max(10, int(16 * s)), bold=True)
-            for value, corner, color in (
-                    (shown_attack, (rect.x + int(13 * s),
-                                    rect.bottom - int(14 * s)),
-                     (255, 235, 140) if boosted else theme.GOLD_BRIGHT),
-                    (max(0, card.health),
-                     (rect.right - int(13 * s), rect.bottom - int(14 * s)),
-                     HEALTH_RED if card.damaged else theme.SUCCESS)):
-                theme.aa_circle(surface, (10, 14, 30), corner, int(12 * s))
-                theme.draw_text(surface, str(value), corner, chip_font,
-                                color, anchor="center")
+            chip_font = theme.body_font(max(10, int(15 * s)), bold=True)
+            atk_color = (255, 235, 140) if boosted else theme.GOLD_BRIGHT
+            hp_color = HEALTH_RED if card.damaged else theme.SUCCESS
+            atk_text = str(shown_attack)
+            hp_text = str(max(0, card.health))
+            total = (chip_font.size(atk_text)[0] + chip_font.size("/")[0]
+                     + chip_font.size(hp_text)[0]) + int(14 * s)
+            badge = pygame.Rect(0, 0, total, int(22 * s))
+            badge.bottomright = (rect.right - int(5 * s),
+                                 rect.bottom - int(5 * s))
+            theme.draw_panel(surface, badge, fill=(10, 14, 30),
+                             border=theme.NAVY_EDGE, radius=int(10 * s))
+            x = badge.x + int(7 * s)
+            for part, color in ((atk_text, atk_color),
+                                ("/", theme.TEXT_DIM),
+                                (hp_text, hp_color)):
+                theme.draw_text(surface, part, (x, badge.centery),
+                                chip_font, color, anchor="midleft")
+                x += chip_font.size(part)[0]
             if card.exhausted and not sprite.dying:
                 veil = pygame.Surface(rect.size, pygame.SRCALPHA)
                 pygame.draw.rect(veil, (8, 12, 26, 120), veil.get_rect(),
@@ -1567,19 +1627,44 @@ class MatchScene(Scene):
             for sprite in group:
                 rect = sprite.rect(size)
                 card = sprite.card
-                # charge pips (bottom-left, stacked per kind)
-                y = rect.bottom - int(10 * s)
+                # LEFT COLUMN: charge pips + plane badges stack upward,
+                # each on a dark backing chip so they read over any art
+                y = rect.bottom - int(12 * s)
                 for kind, count in sorted(card.charges.items()):
                     if count <= 0:
                         continue
                     color = self.CHARGE_COLORS.get(kind, theme.GOLD)
+                    chip = pygame.Rect(rect.x + int(3 * s),
+                                       y - int(9 * s),
+                                       int(34 * s), int(17 * s))
+                    theme.draw_panel(surface, chip, fill=(10, 14, 30),
+                                     border=theme.NAVY_EDGE,
+                                     radius=int(8 * s))
                     theme.aa_circle(surface, color,
-                                    (rect.x + int(9 * s), y), int(6 * s))
+                                    (chip.x + int(9 * s), chip.centery),
+                                    int(5 * s))
                     theme.draw_text(surface, str(count),
-                                    (rect.x + int(20 * s), y),
+                                    (chip.x + int(18 * s), chip.centery),
                                     theme.body_font(int(11 * s), bold=True),
                                     color, anchor="midleft")
-                    y -= int(15 * s)
+                    y -= int(19 * s)
+                # plane indicators: Umbral ☾ (violet) / Veil Pierce ◈ (cyan)
+                for kw, glyph, color in (("umbral", "☾", (185, 130, 255)),
+                                         ("veil_pierce", "◈",
+                                          (120, 220, 255))):
+                    if not card.has_kw(kw):
+                        continue
+                    chip = pygame.Rect(rect.x + int(3 * s), y - int(9 * s),
+                                       int(20 * s), int(17 * s))
+                    theme.draw_panel(surface, chip, fill=(10, 14, 30),
+                                     border=color, radius=int(8 * s))
+                    theme.draw_text(surface, glyph, chip.center,
+                                    theme.body_font(int(11 * s), bold=True),
+                                    color, anchor="center")
+                    y -= int(19 * s)
+                if card.has_kw("umbral"):
+                    theme.draw_glow_rect(surface, rect, (150, 90, 230),
+                                         0.28, radius=10, spread=8)
                 # keyword initials strip (top-left, up to 4)
                 initials = [k[0].upper() for k in card.keywords][:4]
                 if initials:
