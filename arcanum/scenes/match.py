@@ -1074,9 +1074,11 @@ class MatchScene(Scene):
                     best, best_d = sprite, d
         return best
 
-    def _attack_target_under(self, pos: tuple[int, int]) -> Optional[CardSprite]:
-        attacker_card = self.attack_source.card \
-            if self.attack_source is not None else None
+    def _attack_target_under(self, pos: tuple[int, int],
+                             attacker: Optional[CardSprite] = None
+                             ) -> Optional[CardSprite]:
+        source = attacker if attacker is not None else self.attack_source
+        attacker_card = source.card if source is not None else None
         legal = {c.uid for c in
                  self.match.valid_attack_targets(0, attacker_card)}
         best, best_d = None, 1e9
@@ -1152,6 +1154,25 @@ class MatchScene(Scene):
             if sprite.rect(self.card_size).collidepoint(pos):
                 return sprite
         return None
+
+    def _enemy_sprite_under(self, pos: tuple[int, int]
+                            ) -> Optional[CardSprite]:
+        """Nearest enemy sprite (hero / barrier / champion) under the cursor,
+        regardless of legality — the engine decides legality separately."""
+        best, best_d = None, 1e9
+        candidates = [(s, self.board_card_size) for s in self.opp_board
+                      if self._sprite_interactive(s)]
+        candidates += [(s, self.barrier_size) for s in self.opp_barriers]
+        if self.opp_champ is not None:
+            candidates.append((self.opp_champ, self.champ_size))
+        for sprite, size in candidates:
+            rect = sprite.rect(size)
+            if rect.collidepoint(pos):
+                d = (rect.centerx - pos[0]) ** 2 + \
+                    (rect.centery - pos[1]) ** 2
+                if d < best_d:
+                    best, best_d = sprite, d
+        return best
 
     def _own_creature_under(self, pos: tuple[int, int]) -> Optional[CardSprite]:
         for sprite in reversed(self.board):
@@ -1385,33 +1406,24 @@ class MatchScene(Scene):
                 attacker = self.attack_source
                 self.attack_source = None
                 self._target_uid = None
-                target = self._attack_target_under(event.pos)
+                target = self._attack_target_under(event.pos, attacker)
+                # ENGINE IS AUTHORITY: find whatever enemy sprite is under
+                # the cursor and ask the engine directly. This kills the
+                # "should be legal" class of bug where geometry and rules
+                # disagreed — we resolve to the sprite, then trust the rules.
                 if target is None:
-                    # was the cursor over an enemy permanent at all? then
-                    # the engine owes the player an exact reason
-                    under = None
-                    for sprite, size in [(s, self.board_card_size)
-                                         for s in self.opp_board
-                                         if self._sprite_interactive(s)] + \
-                            [(s, self.barrier_size)
-                             for s in self.opp_barriers]:
-                        if sprite.rect(size).collidepoint(event.pos):
-                            under = sprite
-                            break
-                    if under is None and self.opp_champ is not None and \
-                            self.opp_champ.rect(self.champ_size).collidepoint(
-                                event.pos):
-                        under = self.opp_champ
+                    under = self._enemy_sprite_under(event.pos)
                     if under is not None:
                         refusal = self.match.attack_refusal(
                             0, attacker.card.uid, under.card.uid)
-                        log.info("Attack %s -> %s refused: %s",
-                                 attacker.card.name, under.card.name,
-                                 refusal)
-                        self._show_toast(refusal or
-                                         "That attack should be legal — "
-                                         "please report this!", error=True)
-                        return
+                        if not refusal:
+                            target = under          # legal after all: snap
+                        else:
+                            log.info("Attack %s -> %s refused: %s",
+                                     attacker.card.name, under.card.name,
+                                     refusal)
+                            self._show_toast(refusal, error=True)
+                            return
                 if target is None and not self._stack_open[1] and \
                         self._minions_of(1) and \
                         self._stack_rect(1).collidepoint(event.pos):

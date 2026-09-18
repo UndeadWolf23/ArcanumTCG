@@ -380,7 +380,9 @@ class HomeScene(Scene):
             return
         reward = inbox.pop(0)
         lines: list[str] = []
-        if reward.get("type") == "welcome":
+        if reward.get("type") == "warning":
+            lines = list(reward.get("lines", []))
+        elif reward.get("type") == "welcome":
             lines = ["Welcome to Arcanum!",
                      f"You've been gifted {reward.get('packs', 10)} "
                      "Adventure Packs.",

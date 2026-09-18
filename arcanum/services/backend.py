@@ -37,6 +37,7 @@ class Backend:
         self.pack_results: list[dict] = []        # opened-pack reveals
         self._economy_requested = False
         bus.subscribe(Events.NET_CONNECTED, self._request_economy)
+        bus.subscribe(Events.NET_CONNECTED, self._check_server_version)
         bus.subscribe(Events.NET_MESSAGE, self._on_social_message)
 
     def refresh_deck_store(self) -> None:
@@ -106,6 +107,23 @@ class Backend:
             return str(self.profile["username"])
         user = self.session.user
         return user.username if user else "Adventurer"
+
+    def _check_server_version(self, payload=None, **_kw) -> None:
+        from arcanum.core.constants import EXPECTED_SERVER_VERSION
+        got = str((payload or {}).get("server_version", "?"))
+        if got != EXPECTED_SERVER_VERSION:
+            import logging
+            logging.getLogger(__name__).warning(
+                "SERVER VERSION MISMATCH: server v%s, client expects v%s — "
+                "the server deploy is stale; rules may disagree.",
+                got, EXPECTED_SERVER_VERSION)
+            self.pending_rewards.insert(0, {
+                "type": "warning",
+                "lines": ["Server out of date",
+                          f"Server is v{got}; this client expects "
+                          f"v{EXPECTED_SERVER_VERSION}.",
+                          "Redeploy the server — game rules may disagree "
+                          "until then."]})
 
     def _request_economy(self, **_kw) -> None:
         from arcanum.services.net.protocol import MsgType

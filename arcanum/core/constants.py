@@ -76,3 +76,6 @@ SUPABASE_ANON_KEY = os.environ.get(
 GAME_SERVER_URL = os.environ.get("ARCANUM_SERVER_URL",
                                  "wss://arcanumtcg-v313.onrender.com")
 PROTOCOL_VERSION = 1     # bump when the wire protocol changes
+
+# the server build this client was shipped with (mismatch = redeploy)
+EXPECTED_SERVER_VERSION = "0.4.1"
