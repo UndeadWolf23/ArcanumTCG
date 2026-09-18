@@ -33,7 +33,8 @@ Event = dict[str, Any]
 
 
 class MatchController:
-    def activate(self, uid: int, ability: str, target_uid: int = 0) -> None:
+    def activate(self, uid: int, ability: str, target_uid: int = 0,
+                 amount: int | None = None) -> None:
         raise NotImplementedError
 
     """Interface. `state` is a MatchState used for reads/UI hints only."""
@@ -66,8 +67,10 @@ class MatchController:
 # Local (offline practice)
 # ---------------------------------------------------------------------------
 class LocalController(MatchController):
-    def activate(self, uid: int, ability: str, target_uid: int = 0) -> None:
-        ok, why, events = self.state.activate(0, uid, ability, target_uid)
+    def activate(self, uid: int, ability: str, target_uid: int = 0,
+                 amount: int | None = None) -> None:
+        ok, why, events = self.state.activate(0, uid, ability, target_uid,
+                                              amount)
         if not ok:
             self._emit({"type": "rejected", "reason": why})
             return
@@ -268,10 +271,12 @@ class LocalController(MatchController):
 # Remote (server-authoritative)
 # ---------------------------------------------------------------------------
 class RemoteController(MatchController):
-    def activate(self, uid: int, ability: str, target_uid: int = 0) -> None:
-        self.net.send(MsgType.INTENT_ACTIVATE,
-                      {"uid": uid, "ability": ability,
-                       "target": target_uid}, match_id=self.match_id)
+    def activate(self, uid: int, ability: str, target_uid: int = 0,
+                 amount: int | None = None) -> None:
+        payload = {"uid": uid, "ability": ability, "target": target_uid}
+        if amount is not None:
+            payload["amount"] = int(amount)
+        self._send(MsgType.INTENT_ACTIVATE, payload)
 
     def __init__(self, bus: EventBus, net: NetworkClient, match_id: str) -> None:
         super().__init__()

@@ -238,6 +238,7 @@ class MatchScene(Scene):
         self.pending_spell: Optional[CardSprite] = None    # staged, awaiting target
         self.attack_source: Optional[CardSprite] = None    # combat arrow origin
         self.pending_ability: Optional[tuple[int, str]] = None
+        self.pending_amount: Optional[int] = None
         self._quiet = 0.0
         self._reconcile_timer = 0.0
         self._stack_open = {0: False, 1: False}
@@ -567,7 +568,9 @@ class MatchScene(Scene):
         elif etype == "rejected":
             self._cancel_stage()
             self.pending_ability = None
-            self._show_toast(event.get("reason", "That action was refused."))
+            reason = event.get("reason", "That action was refused.")
+            log.info("Server rejected an action: %s", reason)
+            self._show_toast(reason, error=True)
 
     def _spawn_hand_sprite(self, card):
         sprite = CardSprite(card, self.deck_pos)
@@ -952,9 +955,12 @@ class MatchScene(Scene):
     def _leave(self) -> None:
         self.app.goto_home()
 
-    def _show_toast(self, message: str) -> None:
-        self._toast = message
-        self._toast_timer = 2.6
+    def _show_toast(self, message: str, error: bool = False) -> None:
+        self.toast = message
+        self.toast_error = error
+        self._toast_timer = 3.4 if error else 2.6
+        if error:
+            self.app.audio.ui_sound("error")
 
     # ------------------------------------------------------------ hand drag
     def _hand_index_for_x(self, x: float) -> int:
@@ -1172,6 +1178,31 @@ class MatchScene(Scene):
                 self._cancel_stage()
             return
 
+        if event.type == pygame.MOUSEWHEEL and \
+                self.pending_ability is not None and \
+                self.pending_amount is not None:
+            uid, ability = self.pending_ability
+            mn, mx = self.controller.state.ability_amount_range(0, uid,
+                                                                ability)
+            if mx:
+                self.pending_amount = max(mn, min(mx,
+                                                  self.pending_amount
+                                                  + event.y))
+            return
+        if event.type == pygame.KEYDOWN and \
+                self.pending_amount is not None and \
+                self.pending_ability is not None and \
+                event.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_EQUALS,
+                              pygame.K_MINUS):
+            uid, ability = self.pending_ability
+            mn, mx = self.controller.state.ability_amount_range(0, uid,
+                                                                ability)
+            step = 1 if event.key in (pygame.K_UP, pygame.K_EQUALS) else -1
+            if mx:
+                self.pending_amount = max(mn, min(mx,
+                                                  self.pending_amount
+                                                  + step))
+            return
         if event.type == pygame.MOUSEWHEEL:
             mouse = pygame.mouse.get_pos()
             for owner in (0, 1):
@@ -1179,6 +1210,11 @@ class MatchScene(Scene):
                         self._strip_rect(owner).collidepoint(mouse):
                     self._stack_scroll[owner] -= event.y * 60
                     return
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_F3:
+            self._debug_combat = not getattr(self, "_debug_combat", False)
+            self._show_toast("Combat debug "
+                             + ("ON" if self._debug_combat else "off"))
+            return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
             if self._stack_open[0] or self._stack_open[1]:
                 self._stack_open = {0: False, 1: False}
@@ -1247,9 +1283,12 @@ class MatchScene(Scene):
                         sprite.rect(self.board_card_size).collidepoint(
                             event.pos):
                     self.pending_ability = None
-                    self.controller.activate(uid, ability, sprite.card.uid)
+                    amount, self.pending_amount = self.pending_amount, None
+                    self.controller.activate(uid, ability, sprite.card.uid,
+                                             amount=amount)
                     return
             self.pending_ability = None       # clicked away: cancel targeting
+            self.pending_amount = None
             return
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             gem = self._ability_gem_hit(event.pos)
@@ -1258,10 +1297,16 @@ class MatchScene(Scene):
                 from arcanum.game.match import MatchState
                 if ability in MatchState.ABILITY_TARGETS:
                     self.pending_ability = (uid, ability)
+                    mn, mx = self.controller.state.ability_amount_range(
+                        0, uid, ability)
+                    self.pending_amount = mx if mx else None
                     hints = {"discharge": "Choose an enemy hero to strike.",
                              "consume": "Choose a friendly minion to consume.",
                              "purify": "Choose a charged friendly hero."}
-                    self._show_toast(hints.get(ability, "Choose a target."))
+                    hint = hints.get(ability, "Choose a target.")
+                    if self.pending_amount is not None and mx > 1:
+                        hint += "  Scroll to set how many charges."
+                    self._show_toast(hint)
                 else:
                     self.controller.activate(uid, ability)
                 return
@@ -1277,7 +1322,10 @@ class MatchScene(Scene):
                     if ok:
                         self.attack_source = mine
                     else:
-                        self._show_toast(reason)
+                        log.info("Attack pre-flight refused %s: %s",
+                                 mine.card.name, reason)
+                        mine.flash = 0.3
+                        self._show_toast(reason, error=True)
                 elif self.match.phase is Phase.MAIN:
                     self._show_toast("Heroes attack during your combat phase.")
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
@@ -1310,6 +1358,32 @@ class MatchScene(Scene):
                 self.attack_source = None
                 self._target_uid = None
                 target = self._attack_target_under(event.pos)
+                if target is None:
+                    # was the cursor over an enemy permanent at all? then
+                    # the engine owes the player an exact reason
+                    under = None
+                    for sprite, size in [(s, self.board_card_size)
+                                         for s in self.opp_board
+                                         if self._sprite_interactive(s)] + \
+                            [(s, self.barrier_size)
+                             for s in self.opp_barriers]:
+                        if sprite.rect(size).collidepoint(event.pos):
+                            under = sprite
+                            break
+                    if under is None and self.opp_champ is not None and \
+                            self.opp_champ.rect(self.champ_size).collidepoint(
+                                event.pos):
+                        under = self.opp_champ
+                    if under is not None:
+                        refusal = self.match.attack_refusal(
+                            0, attacker.card.uid, under.card.uid)
+                        log.info("Attack %s -> %s refused: %s",
+                                 attacker.card.name, under.card.name,
+                                 refusal)
+                        self._show_toast(refusal or
+                                         "That attack should be legal — "
+                                         "please report this!", error=True)
+                        return
                 if target is None and not self._stack_open[1] and \
                         self._minions_of(1) and \
                         self._stack_rect(1).collidepoint(event.pos):
@@ -1329,6 +1403,9 @@ class MatchScene(Scene):
                 if not ok:
                     self._show_toast(reason)
                     return
+                log.info("Attack intent: %s (uid=%s) -> %s (uid=%s)",
+                         attacker.card.name, attacker.card.uid,
+                         target.card.name, target.card.uid)
                 self.controller.attack(attacker.card.uid, target.card.uid)
 
     def update(self, dt: float) -> None:
@@ -1547,6 +1624,7 @@ class MatchScene(Scene):
         self._draw_particles(surface)
         self._draw_void(surface)
         self._draw_banner(surface)
+        self._draw_combat_debug(surface)
         self._draw_toast(surface)
         if self._confirm_leave:
             dw, dh = surface.get_size()
@@ -1724,6 +1802,14 @@ class MatchScene(Scene):
                 pygame.draw.line(surface, theme.GOLD_DIM, (cx, cy), end)
         if card.kind is Kind.CREATURE and card.sick and not sprite.dying:
             self._draw_summon_swirl(surface, rect)
+            ribbon = pygame.Rect(rect.x, rect.centery - int(9 * s),
+                                 rect.width, int(18 * s))
+            veil = pygame.Surface(ribbon.size, pygame.SRCALPHA)
+            veil.fill((20, 26, 52, 200))
+            surface.blit(veil, ribbon.topleft)
+            theme.draw_text(surface, "SUMMONING", ribbon.center,
+                            theme.body_font(max(8, int(10 * s)), bold=True),
+                            (150, 190, 255), anchor="center")
         if card.kind is Kind.BARRIER:
             badge_color = HEALTH_RED if card.damaged else (120, 190, 255)
             theme.draw_text(surface, f"⛨ {max(0, card.health)}",
@@ -1897,12 +1983,54 @@ class MatchScene(Scene):
                      self.controller.state.valid_ability_targets(0, uid,
                                                                  ability)}
             pulse = 0.4 + 0.3 * abs(math.sin(self._time * 3.4))
+            mouse = pygame.mouse.get_pos()
             for sprite in (*self.opp_board, *self.board):
-                if sprite.card.uid in legal:
-                    theme.draw_glow_rect(surface,
-                                         sprite.rect(self.board_card_size),
-                                         (90, 200, 255), pulse, radius=10,
-                                         spread=8)
+                if sprite.card.uid in legal and \
+                        self._sprite_interactive(sprite):
+                    rect = sprite.rect(self.board_card_size)
+                    theme.draw_glow_rect(surface, rect, (90, 200, 255),
+                                         pulse, radius=10, spread=8)
+                    if self.pending_amount is not None and \
+                            rect.collidepoint(mouse):
+                        theme.draw_text(surface,
+                                        f"-{self.pending_amount}",
+                                        (rect.centerx, rect.y - 14),
+                                        theme.body_font(
+                                            int(22 * self.ui_scale),
+                                            bold=True),
+                                        HEALTH_RED, anchor="center")
+            # spin-down widget beside the source card
+            if self.pending_amount is not None:
+                source = self._sprite_for(0, uid)
+                mn, mx = self.controller.state.ability_amount_range(
+                    0, uid, ability)
+                if source is not None and mx:
+                    self.pending_amount = max(mn, min(mx,
+                                                      self.pending_amount))
+                    s = self.ui_scale
+                    rect = source.rect(self._sprite_size(source))
+                    panel = pygame.Rect(0, 0, int(120 * s), int(56 * s))
+                    panel.midbottom = (rect.centerx, rect.y - int(8 * s))
+                    theme.draw_glow_rect(surface, panel, theme.GOLD_GLOW,
+                                         0.4 + 0.2 * pulse, radius=12,
+                                         spread=10)
+                    theme.draw_panel(surface, panel, fill=theme.NAVY,
+                                     border=theme.GOLD, radius=12)
+                    theme.aa_circle(surface, (90, 200, 255),
+                                    (panel.x + int(18 * s),
+                                     panel.centery - int(6 * s)),
+                                    int(7 * s))
+                    theme.draw_text(surface,
+                                    f"{self.pending_amount} / {mx}",
+                                    (panel.centerx + int(8 * s),
+                                     panel.centery - int(6 * s)),
+                                    theme.body_font(int(19 * s), bold=True),
+                                    theme.GOLD_BRIGHT, anchor="center")
+                    theme.draw_text(surface, "scroll to adjust",
+                                    (panel.centerx,
+                                     panel.bottom - int(11 * s)),
+                                    theme.body_font(int(9 * s)),
+                                    theme.TEXT_FAINT, anchor="center")
         # ability targeting arrow
         if self.pending_ability is not None:
             uid, _ability = self.pending_ability
@@ -2336,21 +2464,54 @@ class MatchScene(Scene):
                             theme.body_font(int(15 * self.ui_scale)),
                             theme.TEXT_DIM, anchor="center", alpha=alpha)
 
-    def _draw_toast(self, surface: pygame.Surface) -> None:
-        if self._toast_timer <= 0 or not self._toast:
+    def _draw_combat_debug(self, surface: pygame.Surface) -> None:
+        if not getattr(self, "_debug_combat", False):
             return
-        w, _h = surface.get_size()
+        font = theme.body_font(11)
+        for sprite in self.board:
+            if sprite.card.is_token and not self._stack_open[0]:
+                continue
+            rect = sprite.rect(self.board_card_size)
+            ok, reason = self.match.can_attack(0, sprite.card.uid)
+            if ok:
+                n = len(self.match.valid_attack_targets(0, sprite.card))
+                text, color = f"READY · {n} targets", theme.SUCCESS
+            else:
+                text, color = reason[:34], theme.DANGER
+            theme.draw_text(surface, text, (rect.centerx, rect.y - 8),
+                            font, color, anchor="center")
+        state = self.match
+        theme.draw_text(surface,
+                        f"phase={state.phase.value} active={state.active} "
+                        f"turn={state.turn_number} "
+                        f"enemy: {sum(1 for c in state.player(1).board if not c.is_token)}H"
+                        f"+{sum(1 for c in state.player(1).board if c.is_token)}m "
+                        f"{len(state.player(1).barriers)}B",
+                        (surface.get_width() // 2,
+                         surface.get_height() - 8),
+                        font, theme.TEXT_FAINT, anchor="midbottom")
+
+    def _draw_toast(self, surface: pygame.Surface) -> None:
+        if self._toast_timer <= 0 or not self.toast:
+            return
+        w, h = surface.get_size()
         fade = min(1.0, self._toast_timer / 0.4)
-        box = pygame.Rect(0, 0, min(w - 80, 520), 42)
-        box.midbottom = (w // 2, self.hand_y - int(self.card_size[1] * 0.75))
+        error = getattr(self, "toast_error", False)
+        font = theme.body_font(int(17 * self.ui_scale), bold=error)
+        width = min(w - 120, font.size(self.toast)[0] + 56)
+        box = pygame.Rect(0, 0, width, int(48 * self.ui_scale))
+        box.midtop = (w // 2, int(h * 0.16))
         veil = pygame.Surface(box.size, pygame.SRCALPHA)
-        pygame.draw.rect(veil, (*theme.NAVY_RAISED, int(235 * fade)),
-                         veil.get_rect(), border_radius=10)
-        pygame.draw.rect(veil, (*theme.GOLD_DIM, int(255 * fade)),
-                         veil.get_rect(), width=1, border_radius=10)
+        pygame.draw.rect(veil, (30, 12, 16, int(242 * fade)) if error
+                         else (*theme.NAVY_RAISED, int(238 * fade)),
+                         veil.get_rect(), border_radius=12)
+        pygame.draw.rect(veil, (*(theme.DANGER if error else theme.GOLD_DIM),
+                                int(255 * fade)),
+                         veil.get_rect(), width=2, border_radius=12)
         surface.blit(veil, box.topleft)
-        theme.draw_text(surface, self._toast, box.center, theme.body_font(15),
-                        theme.TEXT, anchor="center", alpha=int(255 * fade))
+        theme.draw_text(surface, self.toast, box.center, font,
+                        (255, 170, 170) if error else theme.TEXT,
+                        anchor="center", alpha=int(255 * fade))
 
     def _draw_result(self, surface: pygame.Surface) -> None:
         if self.result is None:

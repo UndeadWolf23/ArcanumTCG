@@ -1154,6 +1154,21 @@ class MatchState:
     ABILITY_TARGETS = {"discharge": "enemy_hero",
                        "consume": "friendly_minion",
                        "purify": "friendly_charged"}
+    # abilities where the player CHOOSES how much to spend:
+    # ability -> the charge kind that funds it (max = current count)
+    ABILITY_AMOUNTS = {"discharge": "lightning"}
+
+    def ability_amount_range(self, index: int, uid: int,
+                             ability: str) -> tuple[int, int]:
+        """(min, max) spendable for an amount ability; (0, 0) if not one."""
+        kind = self.ABILITY_AMOUNTS.get(ability)
+        if kind is None:
+            return 0, 0
+        _owner, card, _zone = self._find_card(uid)
+        if card is None:
+            return 0, 0
+        have = card.charges.get(kind, 0)
+        return (1, have) if have > 0 else (0, 0)
 
     def _sanctuary_up(self, index: int) -> bool:
         return any(b.has_kw("sanctuary")
@@ -1197,7 +1212,9 @@ class MatchState:
         return out
 
     def activate(self, index: int, uid: int, ability: str,
-                 target_uid: int = 0):
+                 target_uid: int = 0,
+                 amount: int | None = None
+                 ) -> tuple[bool, str, list[Event]]:
         events: list[Event] = []
         if ability not in self.available_abilities(index, uid):
             return False, "That ability can't be used right now.", events
@@ -1216,9 +1233,17 @@ class MatchState:
                     return False, "Their Sanctuary shields those heroes.", \
                         events
                 return False, "Discharge needs an enemy hero target.", events
-            amount = card.charges.pop("lightning", 0)
-            if amount <= 0:
+            have = card.charges.get("lightning", 0)
+            if have <= 0:
                 return False, "No Lightning charges stored.", events
+            spend = have if amount is None else int(amount)
+            if not 1 <= spend <= have:
+                return False, (f"Choose between 1 and {have} Lightning "
+                               "charges."), events
+            card.charges["lightning"] = have - spend
+            if card.charges["lightning"] <= 0:
+                card.charges.pop("lightning", None)
+            amount = spend
             events.append({"type": "keyword", "keyword": "discharge",
                            "player": index, "uid": uid, "amount": amount})
             target.health -= amount
@@ -1226,7 +1251,8 @@ class MatchState:
                            "uid": target.uid, "amount": amount,
                            "health": target.health})
             events.append({"type": "charge", "player": index, "uid": uid,
-                           "kind": "lightning", "count": 0})
+                           "kind": "lightning",
+                           "count": card.charges.get("lightning", 0)})
             if target.health <= 0:
                 if target.has_kw("undying") and not target.undying_spent:
                     target.undying_spent = True
@@ -1292,25 +1318,42 @@ class MatchState:
         self._cleanup_dead(events)
         return True, "", events
 
-    def attack(self, index: int, attacker_uid: int,
-               target_uid: int) -> tuple[bool, str, list[Event]]:
+    def attack_refusal(self, index: int, attacker_uid: int,
+                       target_uid: int) -> str:
+        """'' when the attack is fully legal; otherwise THE precise human
+        reason. One validator feeds attack(), the client's pre-flight, and
+        the debug overlay — so every layer tells the same truth."""
         ok, reason = self.can_attack(index, attacker_uid)
         if not ok:
-            return False, reason, []
+            return reason
+        attacker = next((c for c in self.players[index].board
+                         if c.uid == attacker_uid), None)
+        if attacker is None:
+            return "That hero isn't on your board."
+        enemy = self.players[1 - index]
+        targets = self.valid_attack_targets(index, attacker)
+        if any(t.uid == target_uid for t in targets):
+            return ""
+        if attacker.has_kw("umbral"):
+            return ("Their Umbral and Veil Pierce heroes intercept — "
+                    "fight them first.")
+        if enemy.barriers:
+            return "Their barriers must be broken first."
+        if enemy.champion is not None and target_uid == enemy.champion.uid \
+                and enemy.board:
+            return "Enemy heroes must be dealt with first."
+        return "That isn't a legal attack target."
+
+    def attack(self, index: int, attacker_uid: int,
+               target_uid: int) -> tuple[bool, str, list[Event]]:
+        refusal = self.attack_refusal(index, attacker_uid, target_uid)
+        if refusal:
+            return False, refusal, []
         attacker = next(c for c in self.players[index].board
                         if c.uid == attacker_uid)
         enemy = self.players[1 - index]
         targets = self.valid_attack_targets(index, attacker)
-        target = next((t for t in targets if t.uid == target_uid), None)
-        if target is None:
-            if attacker.has_kw("umbral"):
-                return False, ("Their Umbral and Veil Pierce heroes "
-                               "intercept — fight them first."), []
-            if enemy.barriers:
-                return False, "Their barriers must be broken first.", []
-            if enemy.board and enemy.champion and target_uid == enemy.champion.uid:
-                return False, "Enemy heroes must be dealt with first.", []
-            return False, "That isn't a legal attack target.", []
+        target = next(t for t in targets if t.uid == target_uid)
 
         attacker.exhausted = True
         events: list[Event] = [{"type": "attack", "player": index,

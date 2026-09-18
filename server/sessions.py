@@ -316,11 +316,13 @@ class MatchSession:
                 int(env.payload.get("attacker_uid", -1)),
                 int(env.payload.get("target_uid", -1)))
         elif mtype == MsgType.INTENT_ACTIVATE.value:
+            raw_amount = env.payload.get("amount")
             ok, reason, events = self.match.activate(
                 seat_index,
                 int(env.payload.get("uid", -1)),
                 str(env.payload.get("ability", "")),
-                int(env.payload.get("target", 0)))
+                int(env.payload.get("target", 0)),
+                int(raw_amount) if raw_amount is not None else None)
         else:
             ok, reason, events = False, f"Unknown intent {mtype!r}.", []
 
