@@ -292,125 +292,242 @@ def run() -> None:
              "offset": [0.0, 0.0],    # template-space pan
              "zoom": 1.0}
 
-    # ---------------- left: the form ----------------
-    form = tk.Frame(root, bg=NAVY)
-    form.pack(side="left", fill="both", expand=True, padx=14, pady=12)
+    # ---------------- theme ----------------
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:  # noqa: BLE001
+        pass
+    style.configure("TCombobox", fieldbackground=NAVY2, background=NAVY2,
+                    foreground=TEXT, arrowcolor=GOLD, bordercolor=NAVY2,
+                    lightcolor=NAVY2, darkcolor=NAVY2)
+    style.map("TCombobox", fieldbackground=[("readonly", NAVY2)],
+              foreground=[("readonly", TEXT)])
+    root.option_add("*TCombobox*Listbox.background", NAVY2)
+    root.option_add("*TCombobox*Listbox.foreground", TEXT)
+    root.option_add("*TCombobox*Listbox.selectBackground", GOLD)
+    root.geometry("1280x820")
 
-    def label(text, row, col=0):
-        tk.Label(form, text=text, bg=NAVY, fg=GOLD,
-                 font=("Georgia", 10, "bold")).grid(
-            row=row, column=col, sticky="w", pady=(8, 0))
+    def styled_entry(parent, width=30, justify="left"):
+        e = tk.Entry(parent, width=width, bg=NAVY2, fg=TEXT,
+                     insertbackground=GOLD, relief="flat", justify=justify,
+                     highlightthickness=1, highlightbackground="#1e2b57",
+                     highlightcolor=GOLD, font=("Georgia", 10))
+        return e
 
-    def entry(row, col=1, width=34):
-        widget = tk.Entry(form, width=width, bg=NAVY2, fg=TEXT,
-                          insertbackground=TEXT, relief="flat")
-        widget.grid(row=row, column=col, sticky="we", pady=(8, 0), padx=6)
-        return widget
+    def styled_button(parent, text, command, primary=False):
+        return tk.Button(parent, text=text, command=command,
+                         bg=GOLD if primary else NAVY2,
+                         fg="#111" if primary else TEXT,
+                         activebackground="#e8c964" if primary else "#22315f",
+                         activeforeground="#111" if primary else TEXT,
+                         relief="flat", padx=12, pady=4,
+                         font=("Georgia", 10, "bold" if primary else
+                               "normal"), cursor="hand2")
 
-    label("Name", 0)
-    name_entry = entry(0)
-    label("Card ID", 1)
-    id_entry = entry(1)
-    tk.Button(form, text="auto", command=lambda: (
+    # ---------------- layout skeleton ----------------
+    outer = tk.Frame(root, bg=NAVY)
+    outer.pack(fill="both", expand=True)
+    left = tk.Frame(outer, bg=NAVY)
+    left.pack(side="left", fill="both", expand=True, padx=(14, 8), pady=10)
+    right = tk.Frame(outer, bg=NAVY)
+    right.pack(side="right", fill="y", padx=(8, 14), pady=10)
+    statusbar = tk.Frame(root, bg="#0a1126")
+    statusbar.pack(side="bottom", fill="x")
+    status = tk.Label(statusbar, text="Ready.", bg="#0a1126", fg=TEXT,
+                      anchor="w", justify="left", wraplength=1240,
+                      font=("Georgia", 9), padx=12, pady=6)
+    status.pack(fill="x")
+
+    def section(title):
+        box = tk.LabelFrame(left, text=f" {title} ", bg=NAVY, fg=GOLD,
+                            font=("Georgia", 10, "bold"), bd=1,
+                            relief="groove", labelanchor="nw",
+                            highlightbackground="#1e2b57")
+        box.pack(fill="x", pady=(0, 8))
+        inner = tk.Frame(box, bg=NAVY)
+        inner.pack(fill="x", padx=10, pady=8)
+        return box, inner
+
+    def field_label(parent, text):
+        return tk.Label(parent, text=text, bg=NAVY, fg="#b9c0d4",
+                        font=("Georgia", 9))
+
+    # ---------------- Identity ----------------
+    _sec, iden = section("Identity")
+    field_label(iden, "Name").grid(row=0, column=0, sticky="w")
+    name_entry = styled_entry(iden, width=30)
+    name_entry.grid(row=0, column=1, sticky="we", padx=(8, 14))
+    field_label(iden, "Card ID").grid(row=0, column=2, sticky="w")
+    id_entry = styled_entry(iden, width=22)
+    id_entry.grid(row=0, column=3, sticky="we", padx=(8, 4))
+    styled_button(iden, "auto", lambda: (
         id_entry.delete(0, "end"),
-        id_entry.insert(0, make_card_id(name_entry.get() or "card"))),
-        bg=NAVY2, fg=TEXT, relief="flat").grid(row=1, column=2)
-
-    label("Type", 2)
+        id_entry.insert(0, make_card_id(name_entry.get() or "card")))
+        ).grid(row=0, column=4)
+    field_label(iden, "Type").grid(row=1, column=0, sticky="w", pady=(8, 0))
     type_var = tk.StringVar(value="hero")
-    type_box = ttk.Combobox(form, textvariable=type_var, state="readonly",
-                            values=[t.value for t in CardType], width=14)
-    type_box.grid(row=2, column=1, sticky="w", padx=6, pady=(8, 0))
-
-    label("Rarity", 3)
+    type_box = ttk.Combobox(iden, textvariable=type_var, state="readonly",
+                            values=[t.value for t in CardType], width=12)
+    type_box.grid(row=1, column=1, sticky="w", padx=(8, 14), pady=(8, 0))
+    field_label(iden, "Rarity").grid(row=1, column=2, sticky="w",
+                                     pady=(8, 0))
     rarity_var = tk.StringVar(value="common")
-    ttk.Combobox(form, textvariable=rarity_var, state="readonly",
-                 values=[r.value for r in Rarity], width=14).grid(
-        row=3, column=1, sticky="w", padx=6, pady=(8, 0))
+    ttk.Combobox(iden, textvariable=rarity_var, state="readonly",
+                 values=[r.value for r in Rarity], width=12).grid(
+        row=1, column=3, sticky="w", padx=(8, 4), pady=(8, 0))
+    field_label(iden, "Set").grid(row=2, column=0, sticky="w", pady=(8, 0))
+    set_entry = styled_entry(iden, width=10)
+    set_entry.insert(0, "BASE")
+    set_entry.grid(row=2, column=1, sticky="w", padx=(8, 14), pady=(8, 0))
+    collectible_var = tk.BooleanVar(value=True)
+    tk.Checkbutton(iden, text="Collectible (appears in packs)",
+                   variable=collectible_var, bg=NAVY, fg=TEXT,
+                   activebackground=NAVY, activeforeground=TEXT,
+                   selectcolor=NAVY2,
+                   command=lambda: update_preview()).grid(
+        row=2, column=2, columnspan=3, sticky="w", pady=(8, 0))
+    iden.columnconfigure(1, weight=1)
+    iden.columnconfigure(3, weight=1)
 
-    stats_label = tk.Label(form, text="Stats", bg=NAVY, fg=GOLD,
-                           font=("Georgia", 10, "bold"))
-    stats_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
-    stat_frame = tk.Frame(form, bg=NAVY)
-    stat_frame.grid(row=4, column=1, sticky="w", padx=6, pady=(8, 0))
+    # ---------------- Stats (type-gated, grid keeps order) --------------
+    stats_section, stats = section("Stats")
     stat_entries = {}
     stat_cells = {}
-    for stat in ("cost", "attack", "health", "durability"):
-        cell = tk.Frame(stat_frame, bg=NAVY)
-        cell.pack(side="left", padx=3)
-        tk.Label(cell, text=stat.capitalize(), bg=NAVY, fg=TEXT,
-                 font=("Georgia", 8)).pack()
-        e = tk.Entry(cell, width=5, bg=NAVY2, fg=TEXT, justify="center",
-                     insertbackground=TEXT, relief="flat")
+    for col, stat in enumerate(("cost", "attack", "health", "durability")):
+        cell = tk.Frame(stats, bg=NAVY)
+        cell.grid(row=0, column=col, padx=(0, 18))
+        tk.Label(cell, text=stat.capitalize(), bg=NAVY, fg="#b9c0d4",
+                 font=("Georgia", 9)).pack()
+        e = styled_entry(cell, width=6, justify="center")
         e.insert(0, "0")
         e.pack()
         stat_entries[stat] = e
         stat_cells[stat] = cell
 
-    ht_label = tk.Label(form, text="Hero types (up to 2)", bg=NAVY, fg=GOLD,
-                        font=("Georgia", 10, "bold"))
-    ht_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
-    ht_frame = tk.Frame(form, bg=NAVY)
-    ht_frame.grid(row=5, column=1, sticky="w", padx=6, pady=(8, 0))
+    # ---------------- Hero types (whole section gated) ------------------
+    ht_section, ht = section("Hero types  (up to 2)")
     ht_vars = [tk.StringVar(value=""), tk.StringVar(value="")]
     for var in ht_vars:
-        ttk.Combobox(ht_frame, textvariable=var, state="readonly",
-                     values=[""] + list(HERO_TYPES), width=16).pack(
-            side="left", padx=3)
+        ttk.Combobox(ht, textvariable=var, state="readonly",
+                     values=[""] + list(HERO_TYPES), width=18).pack(
+            side="left", padx=(0, 8))
 
-    def apply_type_gating(*_a):
-        """Only show what this card type actually uses — and clear what it
-        can't legally carry, so stale numbers never fail validation."""
+    # ---------------- Keywords ----------------
+    _sec, kws = section("Keywords")
+    kw_row = tk.Frame(kws, bg=NAVY)
+    kw_row.pack(fill="x")
+    kw_pick = ttk.Combobox(kw_row, state="readonly", width=26)
+    kw_pick.pack(side="left")
+    tk.Label(kw_row, text="X", bg=NAVY, fg="#b9c0d4",
+             font=("Georgia", 9)).pack(side="left", padx=(10, 2))
+    kw_value = styled_entry(kw_row, width=4, justify="center")
+    kw_value.pack(side="left")
+    styled_button(kw_row, "Add", lambda: add_keyword(),
+                  primary=True).pack(side="left", padx=(10, 4))
+    styled_button(kw_row, "Remove",
+                  lambda: remove_keyword()).pack(side="left")
+    kw_list = tk.Listbox(kws, height=5, bg=NAVY2, fg=TEXT,
+                         selectbackground=GOLD, selectforeground="#111",
+                         relief="flat", font=("Georgia", 10),
+                         highlightthickness=0)
+    kw_list.pack(fill="x", pady=(8, 2))
+    kw_list.bind("<Double-Button-1>", lambda _e: remove_keyword())
+    tk.Label(kws, text="double-click a keyword to remove it",
+             bg=NAVY, fg="#5a648a", font=("Georgia", 8)).pack(anchor="e")
+    chosen_keywords: list[KeywordRef] = []
+    editing = {"loaded_id": "", "image": ""}
+
+    # ---------------- Text ----------------
+    _sec, txt = section("Text")
+    field_label(txt, "Ability text").grid(row=0, column=0, sticky="nw")
+    rules_box = tk.Text(txt, height=3, width=46, bg=NAVY2, fg=TEXT,
+                        insertbackground=GOLD, relief="flat", wrap="word",
+                        font=("Georgia", 10), highlightthickness=1,
+                        highlightbackground="#1e2b57", highlightcolor=GOLD)
+    rules_box.grid(row=0, column=1, sticky="we", padx=(8, 0))
+    field_label(txt, "Flavor").grid(row=1, column=0, sticky="w",
+                                    pady=(8, 0))
+    flavor_entry = styled_entry(txt, width=46)
+    flavor_entry.grid(row=1, column=1, sticky="we", padx=(8, 0),
+                      pady=(8, 0))
+    txt.columnconfigure(1, weight=1)
+
+    def load_art(path: str):
+        state["art_source"] = path
+        state["offset"] = [0.0, 0.0]
+        state["zoom"] = 1.0
         try:
-            ct = CardType(type_var.get())
-        except ValueError:
-            return
-        rules = TYPE_FIELDS[ct]
-        for stat in ("attack", "health", "durability"):
-            if rules[stat]:
-                stat_cells[stat].pack(side="left", padx=3)
-            else:
-                stat_cells[stat].pack_forget()
-                stat_entries[stat].delete(0, "end")
-                stat_entries[stat].insert(0, "0")
-        if rules["hero_types"]:
-            ht_label.grid()
-            ht_frame.grid()
-        else:
-            ht_label.grid_remove()
-            ht_frame.grid_remove()
-            for var in ht_vars:
-                var.set("")
-        # keywords from another category can't survive a type switch
-        legal = {k.id for k in keywords_for(ct)}
-        kept = [ref for ref in chosen_keywords if ref.id in legal]
-        if len(kept) != len(chosen_keywords):
-            chosen_keywords[:] = kept
-            kw_list.delete(0, "end")
-            for ref in kept:
-                kw = KEYWORDS_BY_ID[ref.id]
-                shown = (kw.name.format(x=ref.value) if kw.has_value
-                         else kw.name)
-                kw_list.insert("end", shown)
+            from PIL import Image
+            state["art_img"] = Image.open(path).convert("RGB")
+        except Exception as exc:      # noqa: BLE001
+            messagebox.showerror("Art", f"Couldn't open that image: {exc}")
+            state["art_img"] = None
         update_preview()
 
-    label("Keywords", 6)
-    kw_frame = tk.Frame(form, bg=NAVY)
-    kw_frame.grid(row=6, column=1, columnspan=2, sticky="we", padx=6,
-                  pady=(8, 0))
-    kw_pick = ttk.Combobox(kw_frame, state="readonly", width=22)
-    kw_pick.pack(side="left")
-    kw_value = tk.Entry(kw_frame, width=4, bg=NAVY2, fg=TEXT,
-                        insertbackground=TEXT, relief="flat")
-    kw_value.pack(side="left", padx=4)
-    tk.Label(kw_frame, text="X", bg=NAVY, fg=TEXT).pack(side="left")
-    kw_list = tk.Listbox(form, height=6, bg=NAVY2, fg=TEXT,
-                         selectbackground=GOLD, relief="flat")
-    kw_list.grid(row=7, column=1, columnspan=2, sticky="we", padx=6,
-                 pady=(6, 0))
-    kw_list.bind("<Double-Button-1>", lambda _e: remove_keyword())
-    chosen_keywords: list[KeywordRef] = []
-    editing = {"loaded_id": "", "image": ""}   # DB-edit bookkeeping
+    # ---------------- Art & fonts ----------------
+    _sec, artsec = section("Art  &  fonts")
+    art_row = tk.Frame(artsec, bg=NAVY)
+    art_row.pack(fill="x")
+
+    def choose_art():
+        path = filedialog.askopenfilename(
+            title="Choose card art",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp")])
+        if path:
+            load_art(path)
+    styled_button(art_row, "Choose Art…", choose_art).pack(side="left")
+    tk.Label(art_row, text="or drop an image on the preview · drag to "
+                           "reposition · wheel to zoom",
+             bg=NAVY, fg="#5a648a", font=("Georgia", 8)).pack(
+        side="left", padx=10)
+    fs_frame = tk.Frame(artsec, bg=NAVY)
+    fs_frame.pack(fill="x", pady=(8, 0))
+    font_entries = {}
+    for key in ("name", "type", "cost", "rules", "flavor", "stats"):
+        tk.Label(fs_frame, text=key, bg=NAVY, fg="#b9c0d4",
+                 font=("Georgia", 8)).pack(side="left", padx=(0, 2))
+        e = styled_entry(fs_frame, width=4, justify="center")
+        e.insert(0, str(DEFAULT_FONT_SIZES[key]))
+        e.pack(side="left", padx=(0, 10))
+        font_entries[key] = e
+
+    def font_sizes() -> dict:
+        sizes = {}
+        for key, widget in font_entries.items():
+            try:
+                sizes[key] = max(8, min(160, int(widget.get())))
+            except ValueError:
+                pass
+        return sizes
+
+    # ---------------- Publish ----------------
+    _sec, pub = section("Publish")
+    field_label(pub, "Service key").grid(row=0, column=0, sticky="w")
+    key_entry = styled_entry(pub, width=52)
+    key_entry.insert(0, os.environ.get("ARCANUM_SERVICE_KEY", ""))
+    key_entry.config(show="•")
+    key_entry.grid(row=0, column=1, sticky="we", padx=(8, 0))
+    pub.columnconfigure(1, weight=1)
+    buttons = tk.Frame(pub, bg=NAVY)
+    buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+
+    # ---------------- right: live preview + verdicts ----------------
+    PREVIEW_W, PREVIEW_H = 380, 560
+    preview = tk.Canvas(right, width=PREVIEW_W, height=PREVIEW_H, bg=NAVY2,
+                        highlightthickness=1,
+                        highlightbackground="#1e2b57")
+    preview.pack()
+    valid_line = tk.Label(right, text="", bg=NAVY, fg="#7dd487",
+                          font=("Georgia", 10, "bold"), anchor="w",
+                          justify="left", wraplength=PREVIEW_W)
+    valid_line.pack(fill="x", pady=(8, 0))
+    composed_line = tk.Label(right, text="", bg=NAVY, fg="#9aa3b2",
+                             font=("Georgia", 8), anchor="nw",
+                             justify="left", wraplength=PREVIEW_W)
+    composed_line.pack(fill="x", pady=(2, 0))
+    art_photo = {"img": None}
+    drag = {"active": False, "last": (0, 0)}
 
     kw_by_label = {}
 
@@ -434,28 +551,20 @@ def run() -> None:
     def sync_kw_value_box(*_a):
         kw_id = kw_by_label.get(kw_pick.get(), "")
         kw = KEYWORDS_BY_ID.get(kw_id)
+        kw_value.config(state="normal")
         kw_value.delete(0, "end")
         if kw is not None and kw.has_value:
-            kw_value.config(state="normal")
             kw_value.insert(0, str(KW_DEFAULT_VALUES.get(kw_id, 1)))
         else:
             kw_value.config(state="disabled")
-
-    def on_type_change(*_a):
-        refresh_kw_options()
-        apply_type_gating()
-
-    type_box.bind("<<ComboboxSelected>>", on_type_change)
-    kw_pick.bind("<<ComboboxSelected>>", sync_kw_value_box)
-    refresh_kw_options()
 
     def add_keyword():
         kw_id = kw_by_label.get(kw_pick.get(), "")
         if not kw_id:
             return
         if any(ref.id == kw_id for ref in chosen_keywords):
-            status.config(text=f"{KEYWORDS_BY_ID[kw_id].name} is already on "
-                               "this card.", fg="#e5c98a")
+            status.config(text=f"{KEYWORDS_BY_ID[kw_id].name} is already "
+                               "on this card.", fg="#e5c98a")
             return
         kw = KEYWORDS_BY_ID[kw_id]
         value = None
@@ -481,91 +590,47 @@ def run() -> None:
             chosen_keywords.pop(sel[0])
             update_preview()
 
-    tk.Button(kw_frame, text="Add", command=add_keyword, bg=GOLD,
-              relief="flat").pack(side="left", padx=6)
-    tk.Button(kw_frame, text="Remove", command=remove_keyword, bg=NAVY2,
-              fg=TEXT, relief="flat").pack(side="left")
-    kw_list_hint = tk.Label(form, text="double-click a keyword to remove it",
-                            bg=NAVY, fg="#5a648a", font=("Georgia", 8))
-    kw_list_hint.grid(row=7, column=0, sticky="ne", pady=(8, 0))
-
-    label("Ability text", 8)
-    rules_box = tk.Text(form, height=4, width=44, bg=NAVY2, fg=TEXT,
-                        insertbackground=TEXT, relief="flat", wrap="word")
-    rules_box.grid(row=8, column=1, columnspan=2, sticky="we", padx=6,
-                   pady=(8, 0))
-    label("Flavor", 9)
-    flavor_entry = entry(9)
-    label("Set code", 10)
-    set_entry = entry(10, width=10)
-    set_entry.insert(0, "BASE")
-    collectible_var = tk.BooleanVar(value=True)
-    tk.Checkbutton(form, text="Collectible", variable=collectible_var,
-                   bg=NAVY, fg=TEXT, selectcolor=NAVY2,
-                   command=lambda: update_preview()).grid(
-        row=10, column=2, sticky="w")
-
-    def load_art(path: str):
-        state["art_source"] = path
-        state["offset"] = [0.0, 0.0]
-        state["zoom"] = 1.0
+    def apply_type_gating(*_a):
+        """Only show what this card type actually uses — and clear what it
+        can't legally carry, so stale numbers never fail validation."""
         try:
-            from PIL import Image
-            state["art_img"] = Image.open(path).convert("RGB")
-        except Exception as exc:      # noqa: BLE001
-            messagebox.showerror("Art", f"Couldn't open that image: {exc}")
-            state["art_img"] = None
+            ct = CardType(type_var.get())
+        except ValueError:
+            return
+        rules = TYPE_FIELDS[ct]
+        for stat in ("attack", "health", "durability"):
+            if rules[stat]:
+                stat_cells[stat].grid()
+            else:
+                stat_cells[stat].grid_remove()
+                stat_entries[stat].delete(0, "end")
+                stat_entries[stat].insert(0, "0")
+        if rules["hero_types"]:
+            ht_section.pack(fill="x", pady=(0, 8),
+                            after=stats_section)
+        else:
+            ht_section.pack_forget()
+            for var in ht_vars:
+                var.set("")
+        legal = {k.id for k in keywords_for(ct)}
+        kept = [ref for ref in chosen_keywords if ref.id in legal]
+        if len(kept) != len(chosen_keywords):
+            chosen_keywords[:] = kept
+            kw_list.delete(0, "end")
+            for ref in kept:
+                kw = KEYWORDS_BY_ID[ref.id]
+                shown = (kw.name.format(x=ref.value) if kw.has_value
+                         else kw.name)
+                kw_list.insert("end", shown)
         update_preview()
 
-    label("Font sizes", 15)
-    fs_frame = tk.Frame(form, bg=NAVY)
-    fs_frame.grid(row=15, column=1, columnspan=2, sticky="w", padx=6,
-                  pady=(8, 0))
-    font_entries = {}
-    for key in ("name", "type", "cost", "rules", "flavor", "stats"):
-        tk.Label(fs_frame, text=key, bg=NAVY, fg=TEXT,
-                 font=("Georgia", 8)).pack(side="left", padx=(6, 1))
-        e = tk.Entry(fs_frame, width=4, bg=NAVY2, fg=TEXT,
-                     insertbackground=TEXT, relief="flat")
-        e.insert(0, str(DEFAULT_FONT_SIZES[key]))
-        e.pack(side="left")
-        font_entries[key] = e
+    def on_type_change(*_a):
+        refresh_kw_options()
+        apply_type_gating()
 
-    def font_sizes() -> dict:
-        sizes = {}
-        for key, widget in font_entries.items():
-            try:
-                sizes[key] = max(8, min(160, int(widget.get())))
-            except ValueError:
-                pass
-        return sizes
-
-    def choose_art():
-        path = filedialog.askopenfilename(
-            title="Choose card art",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp")])
-        if path:
-            load_art(path)
-
-    tk.Button(form, text="Choose Art...", command=choose_art, bg=NAVY2,
-              fg=TEXT, relief="flat").grid(row=11, column=1, sticky="w",
-                                           padx=6, pady=(12, 0))
-
-    label("Service key (publish)", 12)
-    key_entry = entry(12)
-    key_entry.insert(0, os.environ.get("ARCANUM_SERVICE_KEY", ""))
-
-    status = tk.Label(form, text="", bg=NAVY, fg=TEXT, wraplength=460,
-                      justify="left")
-    status.grid(row=14, column=0, columnspan=3, sticky="we", pady=(10, 0))
-
-    # ---------------- right: live preview ----------------
-    PREVIEW_W, PREVIEW_H = 380, 560
-    preview = tk.Canvas(root, width=PREVIEW_W, height=PREVIEW_H, bg=NAVY2,
-                        highlightthickness=0)
-    preview.pack(side="right", padx=14, pady=12)
-    art_photo = {"img": None}
-    drag = {"active": False, "last": (0, 0)}
+    type_box.bind("<<ComboboxSelected>>", on_type_change)
+    kw_pick.bind("<<ComboboxSelected>>", sync_kw_value_box)
+    refresh_kw_options()
 
     def preview_scale() -> float:
         return PREVIEW_H / TEMPLATE_SIZE[1] if RENDER_OK else 1.0
@@ -627,16 +692,6 @@ def run() -> None:
             return True
         except Exception:  # noqa: BLE001
             return False
-
-    valid_line = tk.Label(form, text="", bg=NAVY, fg="#7dd487",
-                          font=("Georgia", 9, "bold"), anchor="w",
-                          justify="left")
-    valid_line.grid(row=11, column=0, columnspan=3, sticky="we", padx=2,
-                    pady=(10, 0))
-    composed_line = tk.Label(form, text="", bg=NAVY, fg="#9aa3b2",
-                             font=("Georgia", 8), anchor="w",
-                             justify="left", wraplength=430)
-    composed_line.grid(row=12, column=0, columnspan=3, sticky="we", padx=2)
 
     def refresh_validation(spec: CardSpec) -> None:
         ok, why = spec.validate()
@@ -965,21 +1020,14 @@ def run() -> None:
         apply_type_gating()
         update_preview()
 
-    buttons = tk.Frame(form, bg=NAVY)
-    buttons.grid(row=13, column=0, columnspan=3, pady=(14, 0), sticky="w")
-    tk.Button(buttons, text="Publish to Database", command=do_publish,
-              bg=GOLD, font=("Georgia", 11, "bold"),
-              relief="flat", padx=14, pady=6).pack(side="left")
-    tk.Button(buttons, text="Save Local", command=do_save_local, bg=NAVY2,
-              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left",
-                                                            padx=10)
-    tk.Button(buttons, text="New Card", command=do_new_card, bg=NAVY2,
-              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left")
-    tk.Button(buttons, text="Browse DB…", command=browse_database, bg=NAVY2,
-              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left",
-                                                            padx=10)
-    tk.Button(buttons, text="Duplicate", command=duplicate_card, bg=NAVY2,
-              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left")
+    styled_button(buttons, "Publish to Database", do_publish,
+                  primary=True).pack(side="left")
+    styled_button(buttons, "Save Local", do_save_local).pack(side="left",
+                                                             padx=8)
+    styled_button(buttons, "New Card", do_new_card).pack(side="left")
+    styled_button(buttons, "Browse DB…", browse_database).pack(side="left",
+                                                               padx=8)
+    styled_button(buttons, "Duplicate", duplicate_card).pack(side="left")
 
     if dnd_available:
         register_dnd()
