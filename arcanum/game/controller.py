@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 
 from arcanum.core.events import EventBus, Events
 from arcanum.game.dummy_opponent import DummyOpponent
-from arcanum.game.match import MatchState, Phase
+from arcanum.game.match import Kind, MatchState, Phase
 from arcanum.game.serialize import (apply_snapshot, card_to_dict,
                                     opp_hand_count)
 from arcanum.services.net.client import NetworkClient
@@ -46,7 +46,8 @@ class MatchController:
 
     # -- intents (fire and forget; results arrive as events) ---------------
     def start(self) -> None: ...
-    def play_card(self, uid: int, target_uid: int | None = None) -> None: ...
+    def play_card(self, uid: int, target_uid: int | None = None,
+                  as_guard: bool | None = None) -> None: ...
     def attack(self, attacker_uid: int, target_uid: int) -> None: ...
     def pass_phase(self) -> None: ...
     def concede(self) -> None: ...
@@ -202,8 +203,11 @@ class LocalController(MatchController):
             self._advance()
             return
         card, target = choice
+        slot = (self.ai.choose_barrier_slot(self.state)
+                if card.kind is Kind.BARRIER else None)
         try:
-            ok, reason, events = self.state.play_card(1, card.uid, target)
+            ok, reason, events = self.state.play_card(1, card.uid, target,
+                                                      as_guard=slot)
         except Exception:  # noqa: BLE001
             log.exception("Local AI play crashed; advancing.")
             self._advance()
@@ -239,8 +243,10 @@ class LocalController(MatchController):
         self._schedule(1.05, self._ai_attack_step)
 
     # -- intents -------------------------------------------------------------
-    def play_card(self, uid: int, target_uid: int | None = None) -> None:
-        ok, reason, events = self.state.play_card(0, uid, target_uid)
+    def play_card(self, uid: int, target_uid: int | None = None,
+                  as_guard: bool | None = None) -> None:
+        ok, reason, events = self.state.play_card(0, uid, target_uid,
+                                                  as_guard=as_guard)
         if not ok:
             self._emit({"type": "rejected", "reason": reason})
             return
@@ -333,9 +339,12 @@ class RemoteController(MatchController):
     def start(self) -> None:
         pass  # the server started the match; the snapshot is on its way
 
-    def play_card(self, uid: int, target_uid: int | None = None) -> None:
-        self._send(MsgType.INTENT_PLAY_CARD,
-                   {"uid": uid, "target_uid": target_uid})
+    def play_card(self, uid: int, target_uid: int | None = None,
+                  as_guard: bool | None = None) -> None:
+        payload: dict = {"uid": uid, "target_uid": target_uid}
+        if as_guard is not None:
+            payload["as_guard"] = bool(as_guard)
+        self._send(MsgType.INTENT_PLAY_CARD, payload)
 
     def attack(self, attacker_uid: int, target_uid: int) -> None:
         self._send(MsgType.INTENT_ATTACK,

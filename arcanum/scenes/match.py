@@ -757,23 +757,34 @@ class MatchScene(Scene):
         engine mirror (server remains authoritative on activation)."""
         if self._flow_busy:
             return None
-        if sprite not in self.board and sprite not in self.relics:
+        if sprite not in self.board and sprite not in self.relics \
+                and sprite is not self.champ:
             return None
         abilities = self.controller.state.available_abilities(
             0, sprite.card.uid)
         return abilities[0] if abilities else None
 
     def _ability_gem_rect(self, sprite: CardSprite) -> pygame.Rect:
-        size = self.board_card_size if sprite in self.board \
-            else self.relic_size
+        if sprite is self.champ:
+            size = self.champ_size
+        elif sprite in self.board:
+            size = self.board_card_size
+        else:
+            size = self.relic_size
         rect = sprite.rect(size)
         gem = pygame.Rect(0, 0, int(26 * self.ui_scale),
                           int(26 * self.ui_scale))
         gem.center = (rect.right - 4, rect.top + 4)
         return gem
 
+    def _gem_sprites(self):
+        out = [*self.board, *self.relics]
+        if self.champ is not None:
+            out.append(self.champ)
+        return out
+
     def _ability_gem_hit(self, pos) -> Optional[tuple[int, str]]:
-        for sprite in (*self.board, *self.relics):
+        for sprite in self._gem_sprites():
             ability = self._ability_for(sprite)
             if ability and self._ability_gem_rect(sprite).collidepoint(pos):
                 return sprite.card.uid, ability
@@ -1028,9 +1039,14 @@ class MatchScene(Scene):
         if pos[1] >= self.play_line:
             return
         card = sprite.card
-        ok, reason = self.match.can_play(0, card.uid)
+        as_guard: bool | None = None
+        if card.kind is Kind.BARRIER:
+            # THE DROP DECIDES THE SLOT: onto the guard zone = champion's
+            # barrier; anywhere else on the table = field wall
+            as_guard = self._barrier_slot_for_drop(pos)
+        ok, reason = self.match.can_play(0, card.uid, as_guard=as_guard)
         if not ok:
-            self._show_toast(reason)
+            self._show_toast(reason, error=True)
             return
         if card.needs_target:                     # stage; arrow picks the target
             self.hand.remove(sprite)
@@ -1039,10 +1055,16 @@ class MatchScene(Scene):
             sprite.tscale = 1.1
             self.btn_cancel.visible = True
             return
+        if card.kind is Kind.BARRIER:
+            # optimistic slot so the sprite glides to the RIGHT zone before
+            # the server confirms; the snapshot remains authoritative
+            card.guard_champion = bool(as_guard)
+            log.info("Barrier %s -> %s slot", card.name,
+                     "GUARD" if as_guard else "FIELD")
         self.hand.remove(sprite)
         self._place_played_sprite(sprite, owner=0)
         self.app.audio.ui_sound("play")
-        self.controller.play_card(card.uid)
+        self.controller.play_card(card.uid, as_guard=as_guard)
 
     # ------------------------------------------------------------ staging
     def _cancel_stage(self) -> None:
@@ -1229,6 +1251,11 @@ class MatchScene(Scene):
                 target = self._spell_target_under(event.pos, self.pending_spell.card)
                 if target is not None:
                     self._execute_stage(target)
+                elif self._minions_of(1) and not self._stack_open[1] and \
+                        self._stack_rect(1).collidepoint(event.pos):
+                    self._stack_open[1] = True
+                    self._show_toast("Pick a minion — or click away to "
+                                     "back out.")
                 else:
                     self._show_toast("Click an enemy hero — or Cancel.")
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
@@ -1344,6 +1371,14 @@ class MatchScene(Scene):
                     self.controller.activate(uid, ability, sprite.card.uid,
                                              amount=amount)
                     return
+            for owner in (0, 1):
+                if self._minions_of(owner) and not self._stack_open[owner] \
+                        and self._stack_rect(owner).collidepoint(event.pos):
+                    self._stack_open[owner] = True
+                    self._stack_open[1 - owner] = False
+                    self._show_toast("Pick a minion — or click away to "
+                                     "back out.")
+                    return                     # targeting stays armed
             self.pending_ability = None       # clicked away: cancel targeting
             self.pending_amount = None
             return
@@ -1359,7 +1394,9 @@ class MatchScene(Scene):
                     self.pending_amount = mx if mx else None
                     hints = {"discharge": "Choose an enemy hero to strike.",
                              "consume": "Choose a friendly minion to consume.",
-                             "purify": "Choose a charged friendly hero."}
+                             "purify": "Choose a charged friendly hero.",
+                             "sacrifice": "Feed a friendly minion to the "
+                                          "altar."}
                     hint = hints.get(ability, "Choose a target.")
                     if self.pending_amount is not None and mx > 1:
                         hint += "  Scroll to set how many charges."
@@ -2026,8 +2063,8 @@ class MatchScene(Scene):
                                     (rect.x + int(4 * s), rect.y + int(3 * s)),
                                     theme.body_font(int(10 * s), bold=True),
                                     theme.GOLD_DIM, anchor="topleft")
-        # activation gems on own cards
-        for sprite in (*self.board, *self.relics):
+        # activation gems on own cards (champion included: Sacrifice)
+        for sprite in self._gem_sprites():
             ability = self._ability_for(sprite)
             if not ability:
                 continue
@@ -2514,6 +2551,15 @@ class MatchScene(Scene):
                             theme.display_font(int(20 * s)),
                             theme.GOLD_BRIGHT, anchor="center")
 
+    def _guard_drop_rect(self) -> pygame.Rect:
+        rect = pygame.Rect(0, 0, *self.barrier_size)
+        rect.center = self.own_guard_slot
+        return rect.inflate(int(30 * self.ui_scale), int(30 * self.ui_scale))
+
+    def _barrier_slot_for_drop(self, pos: tuple[int, int]) -> bool:
+        """True = champion guard, False = field wall."""
+        return bool(self._guard_drop_rect().collidepoint(pos))
+
     def _draw_barrier_slots(self, surface: pygame.Surface) -> None:
         """Dashed outlines for every barrier slot — filled or not — so the
         wall zones read as real board geography."""
@@ -2521,13 +2567,36 @@ class MatchScene(Scene):
         for slots, guard, color in (
                 (self.opp_field_slots, self.opp_guard_slot, (255, 120, 120)),
                 (self.own_field_slots, self.own_guard_slot, (120, 170, 255))):
+            dragging_barrier = (
+                self.drag is not None
+                and self.drag.card.kind is Kind.BARRIER
+                and slots is self.own_field_slots)
+            state0 = self.controller.state.player(0)
+            field_n = sum(1 for b in state0.barriers if not b.guard_champion)
+            guard_n = sum(1 for b in state0.barriers if b.guard_champion)
+            mouse = pygame.mouse.get_pos()
             for i, (x, y) in enumerate(slots + [guard]):
                 rect = pygame.Rect(0, 0, *self.barrier_size)
                 rect.center = (x, y)
+                fill_a, line_a = 22, 70
+                if dragging_barrier:
+                    is_guard = i == 3
+                    open_slot = (guard_n == 0 if is_guard
+                                 else i >= field_n)
+                    if open_slot:
+                        pulse = 0.45 + 0.3 * abs(math.sin(self._time * 3.4))
+                        hover = rect.inflate(24, 24).collidepoint(mouse)
+                        theme.draw_glow_rect(surface, rect,
+                                             (120, 230, 160) if hover
+                                             else (*color,),
+                                             pulse, radius=10, spread=10)
+                        fill_a, line_a = 60, 190
+                    else:
+                        fill_a, line_a = 10, 30
                 veil = pygame.Surface(rect.size, pygame.SRCALPHA)
-                pygame.draw.rect(veil, (*color, 22), veil.get_rect(),
+                pygame.draw.rect(veil, (*color, fill_a), veil.get_rect(),
                                  border_radius=int(10 * s))
-                pygame.draw.rect(veil, (*color, 70), veil.get_rect(),
+                pygame.draw.rect(veil, (*color, line_a), veil.get_rect(),
                                  width=1, border_radius=int(10 * s))
                 surface.blit(veil, rect.topleft)
                 label = "GUARD" if i == 3 else "WALL"

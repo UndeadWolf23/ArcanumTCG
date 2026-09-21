@@ -35,6 +35,20 @@ class DummyOpponent:
             return None
         return max(rest, key=lambda c: c.cost), None
 
+    def choose_barrier_slot(self, match: MatchState) -> bool | None:
+        """Guard the champion when pressured or when the field is walled;
+        otherwise build the field wall. Returns as_guard for play_card."""
+        me = match.player(self.index)
+        field_n = sum(1 for b in me.barriers if not b.guard_champion)
+        guard_n = sum(1 for b in me.barriers if b.guard_champion)
+        champ = me.champion
+        pressured = champ is not None and champ.health <= 15
+        if guard_n == 0 and (pressured or field_n >= 3):
+            return True
+        if field_n < 3:
+            return False
+        return True if guard_n == 0 else None
+
     def choose_attack(self, match: MatchState) -> Optional[Play]:
         """One attack at a time: (attacker, target_uid) or None when done.
 

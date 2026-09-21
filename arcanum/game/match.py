@@ -104,6 +104,9 @@ class CardInstance:
     aegis_used: bool = False    # Aegis: first save each turn
     undying_spent: bool = False # Undying triggers once ever
     guard_champion: bool = False  # barrier slot: True = champion's guard
+    hero_types: list = field(default_factory=list)   # Pack tribes
+    pack_bonus: int = 0          # current Pack aura applied (+x/+x)
+    attuned_uid: int = 0         # Attune: linked hero uid
 
     def add_charge(self, kind: str, amount: int = 1) -> int:
         self.charges[kind] = self.charges.get(kind, 0) + amount
@@ -139,6 +142,8 @@ class PlayerState:
     pile: list[CardInstance] | None = None      # None = endless random deck
     unspent_last_turn: int = 0
     minions_this_turn: int = 0       # Rally counts token spawns
+    spells_this_turn: int = 0        # Ritual's default condition
+    legacy: list = field(default_factory=list)   # (relic, expires_turn)
     barriers: list[CardInstance] = field(default_factory=list)
     void: list[CardInstance] = field(default_factory=list)
     shielded_until_turn: int = 0     # Last Wall: champion damage immunity
@@ -208,6 +213,7 @@ class MatchState:
                             text=spec.composed_text())
         inst.keywords = {ref.id: ref.value for ref in spec.keywords}
         inst.card_id = spec.id
+        inst.hero_types = [str(t) for t in getattr(spec, "hero_types", [])]
         return inst
 
     def _instance_from_def(self, card_def) -> CardInstance:
@@ -220,6 +226,10 @@ class MatchState:
             haste=card_def.haste)
         inst.keywords = dict(cat.official_keywords(card_def.card_id))
         inst.card_id = card_def.card_id
+        spec = cat.spec_by_id(card_def.card_id)
+        if spec is not None:
+            inst.hero_types = [str(t)
+                               for t in getattr(spec, "hero_types", [])]
         return inst
 
     def _build_pile(self, index: int, deck: dict) -> None:
@@ -323,6 +333,7 @@ class MatchState:
         player.mana = player.max_mana
         for side in self.players:            # "until end of turn" expires
             side.minions_this_turn = 0
+            side.spells_this_turn = 0
             for creature in side.board:
                 creature.temp_attack = 0
                 if creature.temp_health:
@@ -347,6 +358,8 @@ class MatchState:
                      "amount": regen, "health": barrier.health})
         for relic in player.relics:
             relic.ward_used = False
+        if player.champion is not None:
+            player.champion.thorns_used = False
         self.upkeep_triggers(self.pending_turn_events)
 
     # ------------------------------------------------------------ phases
@@ -403,7 +416,8 @@ class MatchState:
                 return card, True
         return None, False
 
-    def can_play(self, index: int, uid: int) -> tuple[bool, str]:
+    def can_play(self, index: int, uid: int,
+                 as_guard: bool | None = None) -> tuple[bool, str]:
         if not self.started:
             return False, "The match hasn't started."
         if self.winner is not None:
@@ -419,8 +433,17 @@ class MatchState:
         cost = card.kw_value("reanimate", card.cost) if from_void else card.cost
         if player.mana < cost:
             return False, f"Not enough mana ({player.mana}/{cost})."
-        if card.kind is Kind.BARRIER and len(player.barriers) >= BARRIER_LIMIT:
-            return False, f"Barrier slots are full ({BARRIER_LIMIT} max)."
+        if card.kind is Kind.BARRIER:
+            field_n = sum(1 for b in player.barriers if not b.guard_champion)
+            guard_n = sum(1 for b in player.barriers if b.guard_champion)
+            if as_guard is True and guard_n >= 1:
+                return False, "Your champion already has a barrier."
+            if as_guard is False and field_n >= FIELD_BARRIERS:
+                return False, ("Your field wall is full "
+                               f"({FIELD_BARRIERS} barriers).")
+            if as_guard is None and field_n >= FIELD_BARRIERS \
+                    and guard_n >= 1:
+                return False, f"Barrier slots are full ({BARRIER_LIMIT} max)."
         if card.kind is Kind.CREATURE and \
                 sum(1 for c in player.board
                     if not c.is_token) >= CREATURE_LIMIT:
@@ -434,8 +457,10 @@ class MatchState:
         return True, ""
 
     def play_card(self, index: int, uid: int,
-                  target_uid: int | None = None) -> tuple[bool, str, list[Event]]:
-        ok, reason = self.can_play(index, uid)
+                  target_uid: int | None = None,
+                  as_guard: bool | None = None
+                  ) -> tuple[bool, str, list[Event]]:
+        ok, reason = self.can_play(index, uid, as_guard=as_guard)
         if not ok:
             return False, reason, []
         card, from_void = self._find_playable(index, uid)
@@ -459,11 +484,25 @@ class MatchState:
         events: list[Event] = [{"type": "played", "player": index, "card": card,
                        "from_void": from_void}]
 
+        if card.kind is Kind.RELIC and card.has_kw("attune"):
+            link = target if (target is not None
+                              and target in player.board) else None
+            if link is None and player.board:
+                link = max(player.board, key=lambda c: c.attack)
+            if link is not None:
+                card.attuned_uid = link.uid
+                events.append({"type": "keyword", "keyword": "attune",
+                               "player": index, "uid": card.uid,
+                               "target": link.uid})
         if card.kind is Kind.BARRIER:
             # three field slots shield the army; the fourth barrier takes
             # the champion-guard slot beside the champion
-            field = [b for b in player.barriers if not b.guard_champion]
-            card.guard_champion = len(field) >= FIELD_BARRIERS
+            if as_guard is None:            # auto: field first, then guard
+                field_n = sum(1 for b in player.barriers
+                              if not b.guard_champion)
+                card.guard_champion = field_n >= FIELD_BARRIERS
+            else:
+                card.guard_champion = as_guard
             player.barriers.append(card)
         elif card.kind is Kind.RELIC and card.has_kw("countdown"):
             card.charges["countdown"] = card.kw_value("countdown", 3)
@@ -478,6 +517,7 @@ class MatchState:
             # state-based actions check for lethal (<=0) toughness — a
             # 0/0 creature only survives if something pumps it first.
             self._enter_battlefield(index, card, events)
+            self._refresh_pack_after(events)
             self._resolve_state_based_death(index, card, events)
         elif card.kind is Kind.RELIC:
             player.relics.append(card)
@@ -501,6 +541,7 @@ class MatchState:
         log.info("%s plays %s (cost %d, %d mana left).",
                  player.name, card.name, card.cost, player.mana)
         if card.kind is Kind.SPELL:
+            player.spells_this_turn += 1
             self.on_spell_cast(index, events)
         return True, "", events
 
@@ -663,6 +704,18 @@ class MatchState:
         count = card.add_charge(kind)
         events.append({"type": "charge", "player": owner, "uid": card.uid,
                        "kind": kind, "count": count})
+        # Attune: linked relics answer every charge this hero gains
+        for relic in self.players[owner].relics:
+            if relic.has_kw("attune") and relic.attuned_uid == card.uid:
+                events.append({"type": "keyword", "keyword": "attune",
+                               "player": owner, "uid": relic.uid})
+                champ = self.players[owner].champion
+                if champ is not None and champ.health < champ.max_health:
+                    champ.health = min(champ.max_health, champ.health + 1)
+                    events.append({"type": "heal", "player": owner,
+                                   "uid": champ.uid, "amount": 1,
+                                   "health": champ.health})
+                    self.on_champion_life_gain(owner, events)
         if card.kind is Kind.CREATURE:
             for relic in self.players[owner].relics:
                 if relic.has_kw("conduit") and not relic.ward_used:
@@ -755,6 +808,9 @@ class MatchState:
                         return i, card, zone_name
             if player.champion is not None and player.champion.uid == uid:
                 return i, player.champion, "champion"
+            for relic, _exp in player.legacy:
+                if relic.uid == uid:
+                    return i, relic, "legacy"
         return None, None, None
 
     def _heroes_with(self, index: int, kw: str) -> list[CardInstance]:
@@ -907,6 +963,10 @@ class MatchState:
         player.relics.remove(relic)
         events.append({"type": "destroy", "player": index,
                        "uid": relic.uid})
+        if relic.has_kw("legacy"):
+            player.legacy.append((relic, self.turn_number + 2))
+            events.append({"type": "keyword", "keyword": "legacy",
+                           "player": index, "uid": relic.uid})
         if relic.has_kw("salvage"):
             saved = next((c for c in player.void
                           if c.kind is Kind.RELIC and c is not relic), None)
@@ -1122,26 +1182,82 @@ class MatchState:
         champ = self.players[index].champion
         if champ is not None and champ.has_kw("treasury"):
             items.append(StackItem(index, champ.uid, "trigger:treasury"))
-        for relic in self.players[index].relics:
+        player_obj = self.players[index]
+        player_obj.legacy = [(r, exp) for r, exp in player_obj.legacy
+                             if exp > self.turn_number]
+        for relic in list(self.players[index].relics) + \
+                self.legacy_actives(index):
             if relic.has_kw("fortune"):
                 items.append(StackItem(index, relic.uid, "trigger:fortune"))
-            if relic.has_kw("countdown"):
+            if relic.has_kw("countdown") and relic in \
+                    self.players[index].relics:
                 items.append(StackItem(index, relic.uid,
                                        "trigger:countdown"))
         self._queue_triggers(items)
         self._resolve_stack(events)
 
+    def legacy_actives(self, index: int) -> list:
+        """Destroyed Legacy relics whose spirit still lingers."""
+        return [r for r, exp in self.players[index].legacy
+                if exp > self.turn_number]
+
+    def _refresh_pack_after(self, events: list) -> None:
+        if getattr(self, "_pack_refreshing", False):
+            return
+        self._pack_refreshing = True
+        try:
+            self.refresh_pack_auras(events)
+        finally:
+            self._pack_refreshing = False
+
+    def refresh_pack_auras(self, events: list) -> None:
+        """Pack {x}: other allied heroes sharing a hero type get +x/+x.
+        Applied statefully (max_health shifts with the aura, MTG-style);
+        losing the aura can kill a damaged hero — cleanup handles it."""
+        for index, side in enumerate(self.players):
+            for card in list(side.board):
+                bonus = 0
+                for ally in side.board:
+                    if ally is card or not ally.has_kw("pack"):
+                        continue
+                    shared = set(t.lower() for t in ally.hero_types) & \
+                        set(t.lower() for t in card.hero_types)
+                    if shared:
+                        bonus += ally.kw_value("pack", 1)
+                delta = bonus - card.pack_bonus
+                if delta:
+                    card.pack_bonus = bonus
+                    card.max_health += delta
+                    card.health += delta
+                    events.append({"type": "buff", "player": index,
+                                   "uid": card.uid, "attack": delta,
+                                   "health": delta})
+        self._cleanup_dead(events)
+
     def end_step_triggers(self, events: list) -> None:
-        """End-of-turn segment for the active player (Ascension)."""
+        """End-of-turn segment for the active player (Ascension, Ritual)."""
         index = self.active
         items = [StackItem(index, h.uid, "trigger:ascension")
                  for h in self._heroes_with(index, "ascension")]
         self._queue_triggers(items)
         self._resolve_stack(events)
+        player = self.players[index]
+        if player.spells_this_turn > 0:
+            for relic in list(player.relics):
+                if not relic.has_kw("ritual"):
+                    continue
+                goal = max(1, relic.kw_value("ritual", 3))
+                self._grant_charge(relic, index, "ritual", events,
+                                   allow_resonate=False)
+                if relic.charges.get("ritual", 0) >= goal:
+                    relic.charges["ritual"] = 0
+                    events.append({"type": "keyword", "keyword": "ritual",
+                                   "player": index, "uid": relic.uid})
+                    events.append(self._draw_one(index))
 
     # ----------------------------------------------- effective (shown) stats
     def effective_attack(self, card: CardInstance, owner: int) -> int:
-        value = card.attack + card.temp_attack
+        value = card.attack + card.temp_attack + card.pack_bonus
         me = self.players[owner].champion
         them = self.players[1 - owner].champion
         if card.has_kw("bloodthirst") and me is not None and them is not None \
@@ -1166,7 +1282,8 @@ class MatchState:
                         "purify")
     ABILITY_TARGETS = {"discharge": "enemy_hero",
                        "consume": "friendly_minion",
-                       "purify": "friendly_charged"}
+                       "purify": "friendly_charged",
+                       "sacrifice": "friendly_minion"}
     # abilities where the player CHOOSES how much to spend:
     # ability -> the charge kind that funds it (max = current count)
     ABILITY_AMOUNTS = {"discharge": "lightning"}
@@ -1222,6 +1339,10 @@ class MatchState:
         if card.has_kw("purify") and not card.exhausted and \
                 self.valid_ability_targets(index, uid, "purify"):
             out.append("purify")
+        if card.has_kw("sacrifice") and card.kind is Kind.CHAMPION \
+                and not card.thorns_used \
+                and self.valid_ability_targets(index, uid, "sacrifice"):
+            out.append("sacrifice")
         return out
 
     def activate(self, index: int, uid: int, ability: str,
@@ -1280,6 +1401,32 @@ class MatchState:
                     self.on_hero_died(target, t_owner, events)
                     if not target.is_token:
                         self._to_void(t_owner, target)
+        elif ability == "sacrifice":
+            if card.kind is not Kind.CHAMPION or not card.has_kw("sacrifice"):
+                return False, "Only a Sacrifice champion may do that.", events
+            if card.thorns_used:
+                return False, "Sacrifice was already used this turn.", events
+            _o, target, _z = self._find_card(target_uid)
+            legal = self.valid_ability_targets(index, uid, "sacrifice")
+            if target is None or target not in legal:
+                return False, "Sacrifice needs a friendly minion.", events
+            card.thorns_used = True          # once-per-turn latch
+            self.players[index].board.remove(target)
+            events.append({"type": "death", "player": index,
+                           "uid": target.uid})
+            self.on_hero_died(target, index, events)
+            self._on_sacrifice(index, events)
+            events.append({"type": "keyword", "keyword": "sacrifice",
+                           "player": index, "uid": uid})
+            # payoff: the champion feeds — 2 life and 1 energy
+            heal = min(2, card.max_health - card.health)
+            if heal > 0:
+                card.health += heal
+                events.append({"type": "heal", "player": index,
+                               "uid": card.uid, "amount": heal,
+                               "health": card.health})
+                self.on_champion_life_gain(index, events)
+            self._gain_energy(index, 1, events)
         elif ability == "tribute":
             self._destroy_relic(index, card, events, sacrifice=True)
             events.append({"type": "keyword", "keyword": "tribute",
@@ -1389,6 +1536,20 @@ class MatchState:
             if amount <= 0 or victim.health <= 0:
                 return
             victim_owner_early = owner_of(victim)
+            # Fortify {x}: while a fortifying barrier stands, that side's
+            # champion and heroes take x less damage from attacks
+            if combat and victim.kind in (Kind.CREATURE, Kind.CHAMPION):
+                shield = sum(b.kw_value("fortify", 1)
+                             for b in self.players[victim_owner_early].barriers
+                             if b.has_kw("fortify") and b.health > 0)
+                if shield:
+                    reduced = min(amount, shield)
+                    amount -= reduced
+                    events.append({"type": "keyword", "keyword": "fortify",
+                                   "player": victim_owner_early,
+                                   "uid": victim.uid, "amount": reduced})
+                    if amount <= 0:
+                        return
             # Last Wall: the champion cannot take damage this round
             if victim.kind is Kind.CHAMPION and \
                     self.players[victim_owner_early].shielded_until_turn \
@@ -1525,6 +1686,7 @@ class MatchState:
 
         # champion defeat (Rebirth-aware) ends the match
         self._cleanup_dead(events)
+        self._refresh_pack_after(events)
         self._check_champion_defeat(events)
         return True, "", events
 

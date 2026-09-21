@@ -320,6 +320,7 @@ ENGINE_IMPLEMENTED = {
     # barriers
     "ward", "reflect", "regenerate", "last_wall", "sanctuary", "aegis",
     "barrierlink",
+    "pack", "sacrifice", "attune", "ritual", "legacy", "fortify",
 }
 
 for _def in KEYWORDS:

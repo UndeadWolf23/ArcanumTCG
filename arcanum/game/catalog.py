@@ -74,6 +74,31 @@ def _spec(id_, name, ct, rarity, cost=0, attack=0, health=0, durability=0,
 
 
 BUILTIN_SPECS: tuple[CardSpec, ...] = (
+    _spec("t_packalpha", "Fang Alpha", CardType.HERO, Rarity.COMMON, cost=3,
+          attack=2, health=3, hero_types=["Wolf"], keywords=(("pack", 1),),
+          text="Pack 1 — other Wolves you control get +1/+1."),
+    _spec("t_packmate", "Fang Hunter", CardType.HERO, Rarity.COMMON, cost=2,
+          attack=2, health=2, hero_types=["Wolf", "Beast"],
+          text="A loyal hunter of the star-fang pack."),
+    _spec("ch_altarist", "Grim Altarist", CardType.CHAMPION, Rarity.RARE,
+          health=26, keywords=(("sacrifice", None),),
+          text="Sacrifice — once per turn, feed a minion to the altar: "
+               "your champion gains 2 life and 1 energy."),
+    _spec("r_attunestone", "Attunement Stone", CardType.RELIC, Rarity.RARE,
+          cost=2, keywords=(("attune", None),),
+          text="Attune — whenever the linked hero gains a charge, your "
+               "champion gains 1 life."),
+    _spec("r_ritualcandle", "Ritual Candle", CardType.RELIC, Rarity.COMMON,
+          cost=1, keywords=(("ritual", 2),),
+          text="Ritual 2 — cast a spell each turn; at 2 charges, draw a "
+               "card."),
+    _spec("r_legacylamp", "Lamp of Legacy", CardType.RELIC, Rarity.EPIC,
+          cost=2, keywords=(("fortune", None), ("legacy", None)),
+          text="Fortune. Legacy — its light outlives the glass."),
+    _spec("b_bulwark", "Star-Forged Bulwark", CardType.BARRIER, Rarity.RARE,
+          cost=3, durability=4, keywords=(("fortify", 1),),
+          text="Fortify 1 — your champion and heroes take 1 less damage "
+               "from attacks."),
     # ------------------------------------------------- starter champions (3)
     _spec("ch_luna", "Luna, Star Regent", CardType.CHAMPION, Rarity.RARE,
           health=25, keywords=(("inspire", None),),

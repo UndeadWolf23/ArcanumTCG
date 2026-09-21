@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 from arcanum.game.dummy_opponent import DummyOpponent
-from arcanum.game.match import MatchState, Phase
+from arcanum.game.match import Kind, MatchState, Phase
 from arcanum.game.serialize import card_to_dict, snapshot_for
 from arcanum.services.net.protocol import Envelope, MsgType
 
@@ -268,7 +268,10 @@ class MatchSession:
                     break
                 await asyncio.sleep(AI_PLAY_DELAY)
                 card, target = choice
-                ok, reason, events = self.match.play_card(1, card.uid, target)
+                slot = (self.ai.choose_barrier_slot(self.match)
+                        if card.kind is Kind.BARRIER else None)
+                ok, reason, events = self.match.play_card(
+                    1, card.uid, target, as_guard=slot)
                 if not ok:
                     log.warning("AI play rejected (%s) — ending main.", reason)
                     break
@@ -309,7 +312,10 @@ class MatchSession:
             uid = int(env.payload.get("uid", -1))
             target = env.payload.get("target_uid")
             target = int(target) if target is not None else None
-            ok, reason, events = self.match.play_card(seat_index, uid, target)
+            raw_guard = env.payload.get("as_guard")
+            ok, reason, events = self.match.play_card(
+                seat_index, uid, target,
+                as_guard=bool(raw_guard) if raw_guard is not None else None)
         elif mtype == MsgType.INTENT_ATTACK.value:
             ok, reason, events = self.match.attack(
                 seat_index,

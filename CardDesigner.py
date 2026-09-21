@@ -179,6 +179,97 @@ def publish(spec: CardSpec, art_path: Path | None,
 # ---------------------------------------------------------------------------
 # GUI
 # ---------------------------------------------------------------------------
+# ------------------------------------------------------------------ helpers
+# Field visibility per card type: the form only shows what the type uses.
+TYPE_FIELDS = {
+    CardType.HERO:     {"attack": True,  "health": True,  "durability": False,
+                        "hero_types": True},
+    CardType.CHAMPION: {"attack": False, "health": True,  "durability": False,
+                        "hero_types": False},
+    CardType.MINION:   {"attack": True,  "health": True,  "durability": False,
+                        "hero_types": False},
+    CardType.SPELL:    {"attack": False, "health": False, "durability": False,
+                        "hero_types": False},
+    CardType.RELIC:    {"attack": False, "health": False, "durability": False,
+                        "hero_types": False},
+    CardType.BARRIER:  {"attack": False, "health": False, "durability": True,
+                        "hero_types": False},
+}
+
+# sensible starting X for value keywords, so "Add" never lands a zero
+KW_DEFAULT_VALUES = {"thorns": 1, "charged": 1, "astral": 3, "reanimate": 2,
+                     "pack": 1, "countdown": 3, "ritual": 2, "reflect": 1,
+                     "fortify": 1, "regenerate": 1}
+
+
+def resolve_image_name(current_id: str, loaded_id: str,
+                       existing_image: str, has_new_art: bool) -> str:
+    """Editing an existing card WITHOUT replacing its art must keep the
+    old (cache-busted) image name — otherwise every text edit would point
+    clients at a file that doesn't exist."""
+    if not has_new_art and existing_image and current_id == loaded_id:
+        return existing_image
+    return f"{current_id}.png"
+
+
+def fetch_cards(service_key: str):
+    """(True, rows) with id/name/collectible/data, or (False, message)."""
+    if not SUPABASE_URL:
+        return False, "SUPABASE_URL is not configured."
+    if not service_key:
+        return False, "Paste the service key first."
+    url = (SUPABASE_URL.rstrip("/") +
+           "/rest/v1/cards?select=id,name,collectible,data&order=name.asc")
+    req = _urlreq.Request(url, headers={
+        "apikey": service_key,
+        "Authorization": f"Bearer {service_key}"})
+    try:
+        with _urlreq.urlopen(req, timeout=20) as resp:
+            rows = json.loads(resp.read() or b"[]")
+            return True, rows
+    except _urlerr.HTTPError as exc:
+        body = exc.read()[:200].decode(errors="replace")
+        if exc.code in (401, 403):
+            return False, "Key rejected — use the service_role key."
+        return False, f"Fetch failed (HTTP {exc.code}): {body}"
+    except (_urlerr.URLError, TimeoutError, OSError) as exc:
+        return False, f"Network problem: {exc}"
+
+
+def spec_from_row(row: dict):
+    """(CardSpec, image_name) from a DB row; tolerant of older rows."""
+    data = dict(row.get("data") or {})
+    data.setdefault("id", row.get("id", ""))
+    data.setdefault("name", row.get("name", "Unnamed"))
+    data.setdefault("card_type", "hero")
+    data.setdefault("rarity", "common")
+    spec = CardSpec.from_dict(data)
+    spec.collectible = bool(row.get("collectible",
+                                    data.get("collectible", True)))
+    return spec, str(data.get("image", "") or "")
+
+
+DRAFT_PATH_NAME = "draft.json"
+
+
+def save_draft(payload: dict) -> None:
+    try:
+        (work_dir() / DRAFT_PATH_NAME).write_text(
+            json.dumps(payload, indent=1))
+    except OSError:
+        pass
+
+
+def load_draft():
+    try:
+        path = work_dir() / DRAFT_PATH_NAME
+        if path.exists():
+            return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
 def run() -> None:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -237,18 +328,28 @@ def run() -> None:
                  values=[r.value for r in Rarity], width=14).grid(
         row=3, column=1, sticky="w", padx=6, pady=(8, 0))
 
-    label("Cost / Attack / Health / Durability", 4)
+    stats_label = tk.Label(form, text="Stats", bg=NAVY, fg=GOLD,
+                           font=("Georgia", 10, "bold"))
+    stats_label.grid(row=4, column=0, sticky="w", pady=(8, 0))
     stat_frame = tk.Frame(form, bg=NAVY)
     stat_frame.grid(row=4, column=1, sticky="w", padx=6, pady=(8, 0))
     stat_entries = {}
+    stat_cells = {}
     for stat in ("cost", "attack", "health", "durability"):
-        e = tk.Entry(stat_frame, width=5, bg=NAVY2, fg=TEXT,
+        cell = tk.Frame(stat_frame, bg=NAVY)
+        cell.pack(side="left", padx=3)
+        tk.Label(cell, text=stat.capitalize(), bg=NAVY, fg=TEXT,
+                 font=("Georgia", 8)).pack()
+        e = tk.Entry(cell, width=5, bg=NAVY2, fg=TEXT, justify="center",
                      insertbackground=TEXT, relief="flat")
         e.insert(0, "0")
-        e.pack(side="left", padx=3)
+        e.pack()
         stat_entries[stat] = e
+        stat_cells[stat] = cell
 
-    label("Hero types (up to 2)", 5)
+    ht_label = tk.Label(form, text="Hero types (up to 2)", bg=NAVY, fg=GOLD,
+                        font=("Georgia", 10, "bold"))
+    ht_label.grid(row=5, column=0, sticky="w", pady=(8, 0))
     ht_frame = tk.Frame(form, bg=NAVY)
     ht_frame.grid(row=5, column=1, sticky="w", padx=6, pady=(8, 0))
     ht_vars = [tk.StringVar(value=""), tk.StringVar(value="")]
@@ -256,6 +357,42 @@ def run() -> None:
         ttk.Combobox(ht_frame, textvariable=var, state="readonly",
                      values=[""] + list(HERO_TYPES), width=16).pack(
             side="left", padx=3)
+
+    def apply_type_gating(*_a):
+        """Only show what this card type actually uses — and clear what it
+        can't legally carry, so stale numbers never fail validation."""
+        try:
+            ct = CardType(type_var.get())
+        except ValueError:
+            return
+        rules = TYPE_FIELDS[ct]
+        for stat in ("attack", "health", "durability"):
+            if rules[stat]:
+                stat_cells[stat].pack(side="left", padx=3)
+            else:
+                stat_cells[stat].pack_forget()
+                stat_entries[stat].delete(0, "end")
+                stat_entries[stat].insert(0, "0")
+        if rules["hero_types"]:
+            ht_label.grid()
+            ht_frame.grid()
+        else:
+            ht_label.grid_remove()
+            ht_frame.grid_remove()
+            for var in ht_vars:
+                var.set("")
+        # keywords from another category can't survive a type switch
+        legal = {k.id for k in keywords_for(ct)}
+        kept = [ref for ref in chosen_keywords if ref.id in legal]
+        if len(kept) != len(chosen_keywords):
+            chosen_keywords[:] = kept
+            kw_list.delete(0, "end")
+            for ref in kept:
+                kw = KEYWORDS_BY_ID[ref.id]
+                shown = (kw.name.format(x=ref.value) if kw.has_value
+                         else kw.name)
+                kw_list.insert("end", shown)
+        update_preview()
 
     label("Keywords", 6)
     kw_frame = tk.Frame(form, bg=NAVY)
@@ -271,35 +408,70 @@ def run() -> None:
                          selectbackground=GOLD, relief="flat")
     kw_list.grid(row=7, column=1, columnspan=2, sticky="we", padx=6,
                  pady=(6, 0))
+    kw_list.bind("<Double-Button-1>", lambda _e: remove_keyword())
     chosen_keywords: list[KeywordRef] = []
+    editing = {"loaded_id": "", "image": ""}   # DB-edit bookkeeping
+
+    kw_by_label = {}
 
     def refresh_kw_options(*_a):
         try:
             ct = CardType(type_var.get())
         except ValueError:
             return
-        options = [k.id for k in keywords_for(ct)]
+        kw_by_label.clear()
+        options = []
+        for k in keywords_for(ct):
+            tag = f" (X = {k.charge})" if k.has_value and k.charge else \
+                (" (X)" if k.has_value else "")
+            shown = f"{k.name.replace(' {x}', '')}{tag}"
+            kw_by_label[shown] = k.id
+            options.append(shown)
         kw_pick["values"] = options
         kw_pick.set(options[0] if options else "")
-    type_box.bind("<<ComboboxSelected>>", refresh_kw_options)
+        sync_kw_value_box()
+
+    def sync_kw_value_box(*_a):
+        kw_id = kw_by_label.get(kw_pick.get(), "")
+        kw = KEYWORDS_BY_ID.get(kw_id)
+        kw_value.delete(0, "end")
+        if kw is not None and kw.has_value:
+            kw_value.config(state="normal")
+            kw_value.insert(0, str(KW_DEFAULT_VALUES.get(kw_id, 1)))
+        else:
+            kw_value.config(state="disabled")
+
+    def on_type_change(*_a):
+        refresh_kw_options()
+        apply_type_gating()
+
+    type_box.bind("<<ComboboxSelected>>", on_type_change)
+    kw_pick.bind("<<ComboboxSelected>>", sync_kw_value_box)
     refresh_kw_options()
 
     def add_keyword():
-        kw_id = kw_pick.get()
+        kw_id = kw_by_label.get(kw_pick.get(), "")
         if not kw_id:
+            return
+        if any(ref.id == kw_id for ref in chosen_keywords):
+            status.config(text=f"{KEYWORDS_BY_ID[kw_id].name} is already on "
+                               "this card.", fg="#e5c98a")
             return
         kw = KEYWORDS_BY_ID[kw_id]
         value = None
         if kw.has_value:
             try:
                 value = int(kw_value.get())
+                if value < 1:
+                    raise ValueError
             except ValueError:
-                messagebox.showerror("Keyword", f"{kw.name} needs a number.")
+                messagebox.showerror(
+                    "Keyword", f"{kw.name.replace(' {x}', '')} needs a "
+                               "positive number for X.")
                 return
         chosen_keywords.append(KeywordRef(kw_id, value))
         shown = kw.name.format(x=value) if kw.has_value else kw.name
-        tag = "" if kw.implemented else "   [engine v2]"
-        kw_list.insert("end", shown + tag)
+        kw_list.insert("end", shown)
         update_preview()
 
     def remove_keyword():
@@ -313,6 +485,9 @@ def run() -> None:
               relief="flat").pack(side="left", padx=6)
     tk.Button(kw_frame, text="Remove", command=remove_keyword, bg=NAVY2,
               fg=TEXT, relief="flat").pack(side="left")
+    kw_list_hint = tk.Label(form, text="double-click a keyword to remove it",
+                            bg=NAVY, fg="#5a648a", font=("Georgia", 8))
+    kw_list_hint.grid(row=7, column=0, sticky="ne", pady=(8, 0))
 
     label("Ability text", 8)
     rules_box = tk.Text(form, height=4, width=44, bg=NAVY2, fg=TEXT,
@@ -453,6 +628,26 @@ def run() -> None:
         except Exception:  # noqa: BLE001
             return False
 
+    valid_line = tk.Label(form, text="", bg=NAVY, fg="#7dd487",
+                          font=("Georgia", 9, "bold"), anchor="w",
+                          justify="left")
+    valid_line.grid(row=11, column=0, columnspan=3, sticky="we", padx=2,
+                    pady=(10, 0))
+    composed_line = tk.Label(form, text="", bg=NAVY, fg="#9aa3b2",
+                             font=("Georgia", 8), anchor="w",
+                             justify="left", wraplength=430)
+    composed_line.grid(row=12, column=0, columnspan=3, sticky="we", padx=2)
+
+    def refresh_validation(spec: CardSpec) -> None:
+        ok, why = spec.validate()
+        if ok:
+            valid_line.config(text="✓ Card is valid", fg="#7dd487")
+        else:
+            valid_line.config(text=f"✗ {why}", fg="#e58a8a")
+        text = spec.composed_text()
+        composed_line.config(
+            text=("Players will read:  " + text) if text else "")
+
     def build_spec() -> CardSpec:
         def num(name):
             try:
@@ -470,7 +665,10 @@ def run() -> None:
             keywords=list(chosen_keywords),
             rules_text=rules_box.get("1.0", "end").strip(),
             flavor=flavor_entry.get().strip(),
-            image=f"{id_entry.get().strip()}.png",
+            image=resolve_image_name(
+                id_entry.get().strip(),
+                editing["loaded_id"], editing["image"],
+                state["art_img"] is not None),
             set_code=set_entry.get().strip() or "BASE",
             collectible=collectible_var.get())
 
@@ -479,6 +677,8 @@ def run() -> None:
 
     def update_preview(*_a):
         spec = build_spec()
+        refresh_validation(spec)
+        _schedule_draft(spec)
         preview.delete("all")
         if RENDER_OK:
             try:
@@ -570,6 +770,142 @@ def run() -> None:
                                       font_sizes=font_sizes(), out_path=out)
         return out
 
+    draft_job = {"id": None}
+
+    def _schedule_draft(spec: CardSpec) -> None:
+        if draft_job["id"] is not None:
+            root.after_cancel(draft_job["id"])
+        payload = {"spec": spec.to_dict(),
+                   "art_source": state["art_source"],
+                   "offset": list(state["offset"]), "zoom": state["zoom"],
+                   "editing": dict(editing)}
+        draft_job["id"] = root.after(
+            800, lambda: (save_draft(payload),
+                          draft_job.update(id=None)))
+
+    def load_spec_into_form(spec: CardSpec, image_name: str = "",
+                            loaded_id: str = "") -> None:
+        name_entry.delete(0, "end"); name_entry.insert(0, spec.name)
+        id_entry.delete(0, "end"); id_entry.insert(0, spec.id)
+        type_var.set(spec.card_type.value)
+        rarity_var.set(spec.rarity.value)
+        for stat, value in (("cost", spec.cost), ("attack", spec.attack),
+                            ("health", spec.health),
+                            ("durability", spec.durability)):
+            stat_entries[stat].delete(0, "end")
+            stat_entries[stat].insert(0, str(value))
+        for i, var in enumerate(ht_vars):
+            var.set(spec.hero_types[i] if i < len(spec.hero_types) else "")
+        chosen_keywords.clear()
+        kw_list.delete(0, "end")
+        for ref in spec.keywords:
+            kw = KEYWORDS_BY_ID.get(ref.id)
+            if kw is None:
+                continue
+            chosen_keywords.append(KeywordRef(ref.id, ref.value))
+            shown = kw.name.format(x=ref.value) if kw.has_value else kw.name
+            kw_list.insert("end", shown)
+        rules_box.delete("1.0", "end")
+        rules_box.insert("1.0", spec.rules_text)
+        flavor_entry.delete(0, "end"); flavor_entry.insert(0, spec.flavor)
+        set_entry.delete(0, "end")
+        set_entry.insert(0, spec.set_code or "BASE")
+        collectible_var.set(spec.collectible)
+        editing["loaded_id"] = loaded_id
+        editing["image"] = image_name
+        refresh_kw_options()
+        apply_type_gating()
+        update_preview()
+
+    def browse_database():
+        key = key_entry.get().strip()
+        ok, result = fetch_cards(key)
+        if not ok:
+            status.config(text=result, fg="#e58a8a")
+            return
+        rows = result
+        win = tk.Toplevel(root)
+        win.title(f"Card Database — {len(rows)} cards")
+        win.configure(bg=NAVY)
+        win.geometry("460x520")
+        search_var = tk.StringVar()
+        tk.Entry(win, textvariable=search_var, bg=NAVY2, fg=TEXT,
+                 insertbackground=TEXT, relief="flat").pack(
+            fill="x", padx=10, pady=(10, 4))
+        listing = tk.Listbox(win, bg=NAVY2, fg=TEXT, selectbackground=GOLD,
+                             relief="flat", font=("Consolas", 10))
+        listing.pack(fill="both", expand=True, padx=10, pady=4)
+        shown_rows = []
+
+        def repopulate(*_a):
+            needle = search_var.get().lower()
+            listing.delete(0, "end")
+            shown_rows.clear()
+            for row in rows:
+                data = row.get("data") or {}
+                ct = str(data.get("card_type", "?"))
+                line = f"{row.get('name', '?'):<28} {ct:<9} {row.get('id')}"
+                if needle and needle not in line.lower():
+                    continue
+                shown_rows.append(row)
+                listing.insert("end", line)
+        search_var.trace_add("write", repopulate)
+        repopulate()
+
+        def load_selected(_e=None):
+            sel = listing.curselection()
+            if not sel:
+                return
+            row = shown_rows[sel[0]]
+            try:
+                spec, image_name = spec_from_row(row)
+            except Exception as exc:  # noqa: BLE001
+                status.config(text=f"Couldn't load that card: {exc}",
+                              fg="#e58a8a")
+                return
+            load_spec_into_form(spec, image_name, loaded_id=spec.id)
+            status.config(
+                text=f"Editing '{spec.name}' — its art is kept unless you "
+                     "load new art; changing the ID publishes a copy.",
+                fg="#e5c98a")
+            win.destroy()
+        listing.bind("<Double-Button-1>", load_selected)
+        tk.Button(win, text="Load selected", command=load_selected, bg=GOLD,
+                  relief="flat", padx=12, pady=4).pack(pady=(0, 10))
+
+    def duplicate_card():
+        base = name_entry.get().strip() or "card"
+        id_entry.delete(0, "end")
+        id_entry.insert(0, make_card_id(base + " copy"))
+        editing["loaded_id"] = ""
+        editing["image"] = ""
+        status.config(text="Duplicated — publishing creates a new card.",
+                      fg=TEXT)
+        update_preview()
+
+    def restore_draft_if_any():
+        payload = load_draft()
+        if not payload:
+            return
+        try:
+            spec = CardSpec.from_dict(payload.get("spec") or {})
+        except Exception:  # noqa: BLE001
+            return
+        if not (spec.name.strip() and spec.name != "Unnamed") \
+                and not payload.get("art_source"):
+            return
+        load_spec_into_form(spec,
+                            payload.get("editing", {}).get("image", ""),
+                            payload.get("editing", {}).get("loaded_id", ""))
+        art = payload.get("art_source")
+        if art and Path(art).exists():
+            load_art(art)
+            state["offset"] = list(payload.get("offset", [0.0, 0.0]))
+            state["zoom"] = float(payload.get("zoom", 1.0))
+            update_preview()
+        status.config(text="Draft restored from your last session.",
+                      fg=TEXT)
+
     def do_publish():
         spec = validate_first()
         if spec is None:
@@ -577,6 +913,15 @@ def run() -> None:
         key = key_entry.get().strip()
         ok, message = publish(spec, rendered_card(spec), key)
         status.config(text=message, fg="#7dd487" if ok else "#e58a8a")
+        if ok:
+            # the published card is now "the existing card": further edits
+            # without new art keep its (possibly cache-busted) image name
+            editing["loaded_id"] = spec.id
+            editing["image"] = spec.image
+            try:
+                (work_dir() / DRAFT_PATH_NAME).unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def do_save_local():
         spec = validate_first()
@@ -614,7 +959,10 @@ def run() -> None:
         state["art_img"] = None
         state["offset"] = [0.0, 0.0]
         state["zoom"] = 1.0
+        editing["loaded_id"] = ""
+        editing["image"] = ""
         status.config(text="New card — form cleared.", fg=TEXT)
+        apply_type_gating()
         update_preview()
 
     buttons = tk.Frame(form, bg=NAVY)
@@ -627,12 +975,19 @@ def run() -> None:
                                                             padx=10)
     tk.Button(buttons, text="New Card", command=do_new_card, bg=NAVY2,
               fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left")
+    tk.Button(buttons, text="Browse DB…", command=browse_database, bg=NAVY2,
+              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left",
+                                                            padx=10)
+    tk.Button(buttons, text="Duplicate", command=duplicate_card, bg=NAVY2,
+              fg=TEXT, relief="flat", padx=14, pady=6).pack(side="left")
 
     if dnd_available:
         register_dnd()
     else:
         status.config(text="Tip: pip install tkinterdnd2 to enable "
                            "drag-and-drop art.", fg=TEXT)
+    apply_type_gating()
+    restore_draft_if_any()
     update_preview()
     root.mainloop()
 

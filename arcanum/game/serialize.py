@@ -18,6 +18,9 @@ def card_to_dict(card: CardInstance) -> dict[str, Any]:
         "cost": card.cost, "attack": card.attack, "health": card.health,
         "max_health": card.max_health, "exhausted": card.exhausted,
         "guard_champion": card.guard_champion,
+        "hero_types": list(card.hero_types),
+        "pack_bonus": card.pack_bonus,
+        "attuned_uid": card.attuned_uid,
         "sick": card.sick, "haste": card.haste, "text": card.text,
         "effect": card.effect.value, "needs_target": card.needs_target,
         "card_id": card.card_id,
@@ -37,6 +40,9 @@ def card_from_dict(data: dict[str, Any]) -> CardInstance:
         max_health=int(data.get("max_health", 0)),
         exhausted=bool(data.get("exhausted", False)),
         guard_champion=bool(data.get("guard_champion", False)),
+        hero_types=[str(t) for t in data.get("hero_types", [])],
+        pack_bonus=int(data.get("pack_bonus", 0)),
+        attuned_uid=int(data.get("attuned_uid", 0)),
         sick=bool(data.get("sick", False)), haste=bool(data.get("haste", False)),
         text=str(data.get("text", "")), effect=Effect(data.get("effect", "none")),
         needs_target=bool(data.get("needs_target", False)),
@@ -56,6 +62,10 @@ def _update_card(card: CardInstance, data: dict[str, Any]) -> None:
     card.exhausted = bool(data.get("exhausted", card.exhausted))
     card.guard_champion = bool(data.get("guard_champion",
                                         card.guard_champion))
+    card.hero_types = [str(t) for t in data.get("hero_types",
+                                                card.hero_types)]
+    card.pack_bonus = int(data.get("pack_bonus", card.pack_bonus))
+    card.attuned_uid = int(data.get("attuned_uid", card.attuned_uid))
     card.sick = bool(data.get("sick", card.sick))
     card.charges = dict(data.get("charges", card.charges))
     card.temp_attack = int(data.get("temp_attack", card.temp_attack))
