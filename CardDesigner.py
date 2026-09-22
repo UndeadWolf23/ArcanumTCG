@@ -463,7 +463,7 @@ def run() -> None:
         except Exception as exc:      # noqa: BLE001
             messagebox.showerror("Art", f"Couldn't open that image: {exc}")
             state["art_img"] = None
-        update_preview()
+        update_preview(immediate=True)
 
     # ---------------- Art & fonts ----------------
     _sec, artsec = section("Art  &  fonts")
@@ -545,7 +545,12 @@ def run() -> None:
             kw_by_label[shown] = k.id
             options.append(shown)
         kw_pick["values"] = options
-        kw_pick.set(options[0] if options else "")
+        if options:
+            kw_pick.config(state="readonly")
+            kw_pick.set(options[0])
+        else:
+            kw_pick.set("Spells use ability text, not keywords")
+            kw_pick.config(state="disabled")
         sync_kw_value_box()
 
     def sync_kw_value_box(*_a):
@@ -658,11 +663,13 @@ def run() -> None:
         drag["last"] = (ev.x, ev.y)
         state["offset"][0] += dx
         state["offset"][1] += dy
-        update_preview()
+        update_preview(immediate=True, fast=True)
 
     def on_release(_ev):
         drag["active"] = False
         preview.configure(cursor="")
+        if state["art_img"] is not None:
+            update_preview(immediate=True)     # crisp pass after the drag
 
     def on_wheel(ev):
         if state["art_img"] is None or not in_art_window(ev.x, ev.y):
@@ -670,7 +677,7 @@ def run() -> None:
         step = 1.1 if getattr(ev, "delta", 0) > 0 or getattr(ev, "num", 0) == 4 \
             else 1 / 1.1
         state["zoom"] = max(0.4, min(4.0, state["zoom"] * step))
-        update_preview()
+        update_preview(immediate=True, fast=True)
 
     preview.bind("<ButtonPress-1>", on_press)
     preview.bind("<B1-Motion>", on_move)
@@ -730,10 +737,11 @@ def run() -> None:
     RARITY_HEX = {"common": "#9aa3b2", "uncommon": "#4caf7d",
                   "rare": "#569cff", "epic": "#b06aff", "legendary": GOLD}
 
-    def update_preview(*_a):
-        spec = build_spec()
-        refresh_validation(spec)
-        _schedule_draft(spec)
+    render_job = {"id": None}
+
+    def render_preview(spec, fast: bool = False) -> None:
+        """The EXPENSIVE part: template render + resize + PhotoImage.
+        `fast` trades resample quality for smoothness during art drags."""
         preview.delete("all")
         if RENDER_OK:
             try:
@@ -743,8 +751,9 @@ def run() -> None:
                     offset=tuple(state["offset"]), zoom=state["zoom"],
                     font_sizes=font_sizes())
                 s = preview_scale()
+                resample = Image.BILINEAR if fast else Image.LANCZOS
                 card = card.resize((round(card.width * s),
-                                    round(card.height * s)), Image.LANCZOS)
+                                    round(card.height * s)), resample)
                 art_photo["img"] = ImageTk.PhotoImage(card)
                 preview.create_image(PREVIEW_W // 2, PREVIEW_H // 2,
                                      image=art_photo["img"])
@@ -761,6 +770,23 @@ def run() -> None:
             except Exception as exc:  # noqa: BLE001
                 print("Template render failed:", exc)
         _vector_preview(spec)
+
+    def update_preview(*_a, immediate: bool = False, fast: bool = False):
+        """Cheap things happen INSTANTLY on every keystroke (validation,
+        composed text, draft scheduling); the costly card render is
+        debounced behind the typing so entry boxes never stutter."""
+        spec = build_spec()
+        refresh_validation(spec)
+        _schedule_draft(spec)
+        if render_job["id"] is not None:
+            root.after_cancel(render_job["id"])
+            render_job["id"] = None
+        if immediate:
+            render_preview(spec, fast=fast)
+        else:
+            render_job["id"] = root.after(
+                220, lambda: (render_job.update(id=None),
+                              render_preview(build_spec())))
 
     RARITY_HEX = {"common": "#9aa3b2", "uncommon": "#4caf7d",
                   "rare": "#569cff", "epic": "#b06aff", "legendary": GOLD}
@@ -827,16 +853,19 @@ def run() -> None:
 
     draft_job = {"id": None}
 
-    def _schedule_draft(spec: CardSpec) -> None:
+    def _schedule_draft(_spec: CardSpec) -> None:
         if draft_job["id"] is not None:
             root.after_cancel(draft_job["id"])
-        payload = {"spec": spec.to_dict(),
-                   "art_source": state["art_source"],
-                   "offset": list(state["offset"]), "zoom": state["zoom"],
-                   "editing": dict(editing)}
-        draft_job["id"] = root.after(
-            800, lambda: (save_draft(payload),
-                          draft_job.update(id=None)))
+
+        def _write():
+            draft_job["id"] = None
+            payload = {"spec": build_spec().to_dict(),
+                       "art_source": state["art_source"],
+                       "offset": list(state["offset"]),
+                       "zoom": state["zoom"],
+                       "editing": dict(editing)}
+            save_draft(payload)
+        draft_job["id"] = root.after(800, _write)
 
     def load_spec_into_form(spec: CardSpec, image_name: str = "",
                             loaded_id: str = "") -> None:

@@ -150,7 +150,8 @@ class CardSpec:
             kw = KEYWORDS_BY_ID.get(ref.id)
             if kw is None:
                 return False, f"Unknown keyword: {ref.id}"
-            if kw.category is not ct:
+            legal_ct = CardType.HERO if ct is CardType.MINION else ct
+            if kw.category is not legal_ct:
                 return False, (f"{kw.name.split(' ')[0]} is a "
                                f"{kw.category.value} keyword; this card is a "
                                f"{ct.value}.")

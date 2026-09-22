@@ -267,6 +267,12 @@ KEYWORDS_BY_ID: dict[str, KeywordDef] = {k.id: k for k in KEYWORDS}
 
 
 def keywords_for(card_type: CardType) -> list[KeywordDef]:
+    """Keywords selectable for a card type. Minions are board creatures in
+    the same combat engine as heroes — every keyword hook iterates the
+    board — so they share the full hero pool. Spells resolve and leave
+    play; they carry no keywords by design (rules live in ability text)."""
+    if card_type is CardType.MINION:
+        card_type = CardType.HERO
     return [k for k in KEYWORDS if k.category is card_type]
 
 
