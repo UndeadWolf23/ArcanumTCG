@@ -261,6 +261,12 @@ KEYWORDS: tuple[KeywordDef, ...] = (
     _barrier("last_wall", "Last Wall",
              "When this Barrier is destroyed, your champion cannot take "
              "damage until the beginning of your next turn."),
+    KeywordDef("blink", "Blink", CardType.SPELL,
+               "You may cast this on any step of any player's turn — even "
+               "while your opponent acts."),
+    KeywordDef("flash", "Flash", CardType.RELIC,
+               "This relic's abilities can be activated on any step of any "
+               "player's turn."),
 )
 
 KEYWORDS_BY_ID: dict[str, KeywordDef] = {k.id: k for k in KEYWORDS}
@@ -327,6 +333,7 @@ ENGINE_IMPLEMENTED = {
     "ward", "reflect", "regenerate", "last_wall", "sanctuary", "aegis",
     "barrierlink",
     "pack", "sacrifice", "attune", "ritual", "legacy", "fortify",
+    "blink", "flash",
 }
 
 for _def in KEYWORDS:

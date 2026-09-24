@@ -143,6 +143,7 @@ class CardSprite:
 
     def update(self, dt: float) -> None:
         self.flash = max(0.0, self.flash - dt * 4.5)
+        self.deny = max(0.0, getattr(self, "deny", 0.0) - dt * 2.0)
         self.age += dt
         rise = getattr(self, "rise", None)
         if rise is not None:
@@ -343,6 +344,16 @@ class MatchScene(Scene):
         self.btn_turn = Button(pygame.Rect(w - int(198 * s), int(h * 0.455),
                                            int(166 * s), int(52 * s)),
                                "To Combat", self._on_turn_button, sound_cb=ui)
+        self.btn_bluff = Button(
+            pygame.Rect(w - int(198 * s), int(h * 0.455) + int(64 * s),
+                        int(80 * s), int(32 * s)), "Bluff",
+            lambda: self._toggle_pref("bluff"), primary=False)
+        self.btn_autopass = Button(
+            pygame.Rect(w - int(110 * s), int(h * 0.455) + int(64 * s),
+                        int(104 * s), int(32 * s)), "Auto-Pass",
+            lambda: self._toggle_pref("auto_pass"), primary=False)
+        self._pref_bluff = False
+        self._pref_autopass = False
         self.lnk_leave = LinkButton((int(70 * s), int(26 * s)), "Leave match",
                                     self._ask_leave, font_size=15)
         self._confirm_leave = False
@@ -368,7 +379,8 @@ class MatchScene(Scene):
                                "Return Home", self._leave, sound_cb=ui)
         self.btn_home.rect.center = (w // 2, int(h * 0.60))
         self.btn_home.visible = False
-        self.widgets = [self.btn_turn, self.lnk_leave, self.btn_cancel, self.btn_home]
+        self.widgets = [self.btn_turn, self.btn_bluff, self.btn_autopass,
+                        self.lnk_leave, self.btn_cancel, self.btn_home]
 
         if self.champ is not None:
             self.champ.tx, self.champ.ty = self.champ_pos
@@ -575,6 +587,15 @@ class MatchScene(Scene):
                 self.floats.append(FloatText(f"+{event.get('amount', 0)}",
                                              (sprite.x, sprite.y - 30),
                                              (120, 230, 140)))
+        elif etype == "priority":
+            if event.get("player") == 0:
+                self.app.audio.ui_sound("draw")
+                reason = event.get("reason", "")
+                self._show_toast("You may respond — cast a Blink/Flash or "
+                                 "click RESOLVE.")
+                self._priority_flash = 1.0
+        elif etype == "priority_passed":
+            self._priority_flash = 0.0
         elif etype == "rejected":
             self._cancel_stage()
             self.pending_ability = None
@@ -755,7 +776,7 @@ class MatchScene(Scene):
     def _ability_for(self, sprite: CardSprite) -> Optional[str]:
         """First activatable ability on this OWN card, straight from the
         engine mirror (server remains authoritative on activation)."""
-        if self._flow_busy:
+        if self._flow_busy and not self._my_priority():
             return None
         if sprite not in self.board and sprite not in self.relics \
                 and sprite is not self.champ:
@@ -990,8 +1011,37 @@ class MatchScene(Scene):
         self.attack_source = None
         self.btn_home.visible = True
 
+    def _toggle_pref(self, which: str) -> None:
+        if which == "bluff":
+            self._pref_bluff = not self._pref_bluff
+            self.controller.set_priority_prefs(bluff=self._pref_bluff)
+            self._show_toast("Bluff on — response windows will open even "
+                             "with nothing to cast." if self._pref_bluff
+                             else "Bluff off.")
+        else:
+            self._pref_autopass = not self._pref_autopass
+            self.controller.set_priority_prefs(
+                auto_pass=self._pref_autopass)
+            self._show_toast("Auto-pass on — windows resolve without you."
+                             if self._pref_autopass else "Auto-pass off.")
+
+    def _my_priority(self) -> bool:
+        return self.controller.state.priority == 0
+
+    def _blink_castable(self, sprite) -> bool:
+        if not self._my_priority():
+            return False
+        card = sprite.card
+        return (card.kind is Kind.SPELL and card.has_kw("blink")
+                and self.match.can_play(0, card.uid)[0])
+
     def _on_turn_button(self) -> None:
-        if self._flow_busy or not self.match.is_local_turn() or self.result:
+        if self.result:
+            return
+        if self._my_priority():
+            self.controller.pass_priority()
+            return
+        if self._flow_busy or not self.match.is_local_turn():
             return
         if self.match.phase in (Phase.MAIN, Phase.COMBAT):
             self._cancel_drag()
@@ -1047,6 +1097,7 @@ class MatchScene(Scene):
         ok, reason = self.match.can_play(0, card.uid, as_guard=as_guard)
         if not ok:
             self._show_toast(reason, error=True)
+            sprite.deny = 1.0                # red flash: can't, and why
             return
         if card.needs_target:                     # stage; arrow picks the target
             self.hand.remove(sprite)
@@ -1299,7 +1350,22 @@ class MatchScene(Scene):
             self._show_toast("Combat debug "
                              + ("ON" if self._debug_combat else "off"))
             return
+        if event.type == pygame.KEYDOWN and \
+                event.key in (pygame.K_SPACE, pygame.K_RETURN):
+            if self.btn_turn.enabled:
+                self._on_turn_button()
+            return
         if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+            if self.drag is not None:
+                self._cancel_drag()
+                return
+            if self.attack_source is not None:
+                self.attack_source = None
+                self._target_uid = None
+                return
+            if getattr(self, "_void_open", False):
+                self._void_open = False
+                return
             if self._stack_open[0] or self._stack_open[1]:
                 self._stack_open = {0: False, 1: False}
                 return
@@ -1532,15 +1598,22 @@ class MatchScene(Scene):
         local = self.match.is_local_turn()
         if self.result is not None:
             self.btn_turn.label = "Match Over"
+        elif self._my_priority():
+            self.btn_turn.label = "RESOLVE"
         elif local and self.match.phase is Phase.MAIN:
             self.btn_turn.label = "To Combat"
         elif local and self.match.phase is Phase.COMBAT:
             self.btn_turn.label = "End Turn"
         else:
             self.btn_turn.label = "Enemy Turn"
-        self.btn_turn.enabled = (self.result is None and local
-                                 and not self._flow_busy
-                                 and self.match.phase in (Phase.MAIN, Phase.COMBAT))
+        self.btn_turn.enabled = (self.result is None
+                                 and (self._my_priority()
+                                      or (local and not self._flow_busy
+                                          and self.match.phase in
+                                          (Phase.MAIN, Phase.COMBAT))))
+        self.btn_bluff.label = "Bluff ✓" if self._pref_bluff else "Bluff"
+        self.btn_autopass.label = ("Auto-Pass ✓" if self._pref_autopass
+                                   else "Auto-Pass")
 
         if self._confirm_leave:
             self.btn_leave_yes.update(dt)
@@ -1689,6 +1762,21 @@ class MatchScene(Scene):
                             targeted=targeted)
         if self.champ is not None:
             self._draw_card(surface, self.champ, self.champ_size)
+        if self._my_priority():
+            pulse = 0.55 + 0.35 * abs(math.sin(self._time * 3.2))
+            strip = pygame.Surface((surface.get_width(),
+                                    int(6 * self.ui_scale)),
+                                   pygame.SRCALPHA)
+            strip.fill((90, 170, 255, int(150 * pulse)))
+            surface.blit(strip, (0, 0))
+            surface.blit(strip, (0, surface.get_height() - strip.get_height()))
+            theme.draw_text(surface, "◈  RESPONSE WINDOW  ◈",
+                            (surface.get_width() // 2,
+                             int(14 * self.ui_scale)),
+                            theme.body_font(max(10,
+                                                int(12 * self.ui_scale)),
+                                            bold=True),
+                            (140, 195, 255), anchor="center")
         self._draw_barrier_slots(surface)
         for sprite in self.opp_barriers:
             self._draw_card(surface, sprite, self.barrier_size, compact=True)
@@ -1697,8 +1785,16 @@ class MatchScene(Scene):
         for sprite in self.opp_board:
             if sprite.card.is_token and not self._stack_open[1]:
                 continue                     # folded into the pile
+            targeted = sprite.card.uid == self._target_uid
             self._draw_card(surface, sprite, self.board_card_size,
-                            targeted=(sprite.card.uid == self._target_uid))
+                            targeted=targeted)
+            if self.attack_source is not None and not targeted \
+                    and self.match.attack_refusal(
+                        0, self.attack_source.card.uid, sprite.card.uid):
+                r = sprite.rect(self.board_card_size)
+                shade = pygame.Surface(r.size, pygame.SRCALPHA)
+                shade.fill((6, 8, 18, 120))
+                surface.blit(shade, r.topleft)
         for sprite in self.board:
             if sprite.card.is_token and not self._stack_open[0]:
                 continue
@@ -1717,6 +1813,10 @@ class MatchScene(Scene):
             self._draw_card(surface, self.pending_spell, self.card_size)
 
         self._draw_arrows(surface)
+        if self._my_priority():
+            glow = 0.5 + 0.4 * abs(math.sin(self._time * 3.4))
+            theme.draw_glow_rect(surface, self.btn_turn.rect,
+                                 (90, 170, 255), glow, radius=12, spread=14)
         if getattr(self, "_pulse_end_turn", 0) > 0:
             pulse = 0.35 + 0.35 * abs(math.sin(self._time * 4))
             theme.draw_glow_rect(surface, self.btn_turn.rect,
@@ -1759,6 +1859,66 @@ class MatchScene(Scene):
         elif self.attack_source is not None:
             draw_arrow(surface, (self.attack_source.x, self.attack_source.y),
                        mouse, ARROW_ATTACK, self._time)
+            self._draw_trade_preview(surface, mouse)
+
+    def _predict_trade(self, attacker, target):
+        """Mirror the engine's combat math for a hover preview: damage
+        dealt (after Fortify), counter damage taken, and who dies."""
+        state = self.controller.state
+        dealt = state.effective_attack(attacker.card, 0)
+        victim = target.card
+        if victim.kind in (Kind.CREATURE, Kind.CHAMPION):
+            shield = sum(b.kw_value("fortify", 1)
+                         for b in state.player(1).barriers
+                         if b.has_kw("fortify") and b.health > 0)
+            dealt = max(0, dealt - shield)
+        taken = 0
+        if victim.kind is Kind.CREATURE and victim.health > 0:
+            taken = state.effective_attack(victim, 1)
+        kills = victim.health - dealt <= 0 and victim.kind is not Kind.CHAMPION
+        dies = (taken > 0 and attacker.card.health - taken <= 0
+                and not attacker.card.has_kw("quick"))
+        if attacker.card.has_kw("lethal") and victim.kind is Kind.CREATURE \
+                and dealt > 0:
+            kills = True
+        if victim.kind is Kind.CREATURE and victim.has_kw("lethal") \
+                and taken > 0 and not attacker.card.has_kw("quick"):
+            dies = True
+        return dealt, taken, kills, dies
+
+    def _draw_trade_preview(self, surface: pygame.Surface,
+                            mouse: tuple[int, int]) -> None:
+        target = self._attack_target_under(mouse, self.attack_source) \
+            or self._enemy_sprite_under(mouse)
+        if target is None:
+            return
+        if self.match.attack_refusal(0, self.attack_source.card.uid,
+                                     target.card.uid):
+            return
+        dealt, taken, kills, dies = self._predict_trade(self.attack_source,
+                                                        target)
+        s = self.ui_scale
+        cx, cy = mouse[0], mouse[1] - int(46 * s)
+        parts = [f"⚔ {dealt}"]
+        if kills:
+            parts.append("☠")
+        if taken > 0:
+            parts.append(f"   ↩ {taken}")
+            if dies:
+                parts.append("☠")
+        label = " ".join(parts)
+        font = theme.body_font(max(12, int(15 * s)), bold=True)
+        pad = int(8 * s)
+        text_img = font.render(label, True, (255, 235, 200))
+        box = pygame.Rect(0, 0, text_img.get_width() + pad * 2,
+                          text_img.get_height() + pad)
+        box.center = (cx, cy)
+        veil = pygame.Surface(box.size, pygame.SRCALPHA)
+        veil.fill((12, 16, 34, 215))
+        pygame.draw.rect(veil, (231, 197, 94, 200), veil.get_rect(),
+                         width=1, border_radius=int(7 * s))
+        surface.blit(veil, box.topleft)
+        surface.blit(text_img, (box.x + pad, box.y + pad // 2))
 
     def _draw_zone_hints(self, surface: pygame.Surface) -> None:
         pulse = 0.28 + 0.10 * math.sin(self._time * 5)
@@ -1830,6 +1990,10 @@ class MatchScene(Scene):
         rect = sprite.rect(size)
         if rect.width < 8:
             return
+        if getattr(sprite, "deny", 0) > 0.01:
+            blink = 0.5 + 0.5 * math.sin(self._time * 18)
+            theme.draw_glow_rect(surface, rect, (235, 80, 80),
+                                 sprite.deny * blink, radius=10, spread=8)
         if sprite.dying:
             # dissolve: render the face offscreen, blit with fading alpha
             temp = pygame.Surface((rect.width, rect.height), pygame.SRCALPHA)
@@ -1884,8 +2048,14 @@ class MatchScene(Scene):
         if face is None and not is_champ:
             gem_r = int(14 * s)
             gem_c = (rect.x + gem_r + int(5 * s), rect.y + gem_r + int(5 * s))
-            pygame.draw.circle(surface, MANA_FILL, gem_c, gem_r)
-            pygame.draw.circle(surface, MANA_CORE, gem_c, gem_r, width=2)
+            broke = (sprite in self.hand
+                     and self.controller.state.player(0).mana < card.cost)
+            pygame.draw.circle(surface,
+                               (96, 32, 40) if broke else MANA_FILL,
+                               gem_c, gem_r)
+            pygame.draw.circle(surface,
+                               (200, 90, 90) if broke else MANA_CORE,
+                               gem_c, gem_r, width=2)
             theme.draw_text(surface, str(card.cost), gem_c,
                             theme.body_font(max(10, int(15 * s)), bold=True),
                             theme.TEXT, anchor="center")
@@ -2357,6 +2527,13 @@ class MatchScene(Scene):
         step = size + 6
         x = 34
         top = h // 2 - (MAX_MANA * step) // 2
+        bank = getattr(player, "energy_next_turn", 0)
+        if bank:
+            theme.draw_text(surface, f"+{bank} next turn",
+                            (int(surface.get_width() * 0.5),
+                             int(surface.get_height() * 0.964)),
+                            theme.body_font(max(9, int(11 * self.ui_scale))),
+                            (150, 220, 170), anchor="center")
         theme.draw_text(surface, f"{player.mana}/{player.max_mana}",
                         (x + size // 2, top - 28),
                         theme.body_font(20, bold=True), MANA_CORE,
@@ -2593,11 +2770,20 @@ class MatchScene(Scene):
                         fill_a, line_a = 60, 190
                     else:
                         fill_a, line_a = 10, 30
-                veil = pygame.Surface(rect.size, pygame.SRCALPHA)
-                pygame.draw.rect(veil, (*color, fill_a), veil.get_rect(),
-                                 border_radius=int(10 * s))
-                pygame.draw.rect(veil, (*color, line_a), veil.get_rect(),
-                                 width=1, border_radius=int(10 * s))
+                cache = getattr(self, "_slot_veils", None)
+                if cache is None:
+                    cache = self._slot_veils = {}
+                key = (color, fill_a, line_a, rect.size)
+                veil = cache.get(key)
+                if veil is None:
+                    veil = pygame.Surface(rect.size, pygame.SRCALPHA)
+                    pygame.draw.rect(veil, (*color, fill_a),
+                                     veil.get_rect(),
+                                     border_radius=int(10 * s))
+                    pygame.draw.rect(veil, (*color, line_a),
+                                     veil.get_rect(), width=1,
+                                     border_radius=int(10 * s))
+                    cache[key] = veil
                 surface.blit(veil, rect.topleft)
                 label = "GUARD" if i == 3 else "WALL"
                 theme.draw_text(surface, label, rect.center,

@@ -249,6 +249,38 @@ def spec_from_row(row: dict):
     return spec, str(data.get("image", "") or "")
 
 
+def delete_card(service_key: str, card_id: str, image: str = ""):
+    """Remove a card row and its art object. (True, msg) / (False, msg)."""
+    if not SUPABASE_URL:
+        return False, "SUPABASE_URL is not configured."
+    if not service_key:
+        return False, "Paste the service key first."
+    if not card_id:
+        return False, "No card selected."
+    headers = {"apikey": service_key,
+               "Authorization": f"Bearer {service_key}"}
+    url = SUPABASE_URL.rstrip("/") + f"/rest/v1/cards?id=eq.{card_id}"
+    req = _urlreq.Request(url, headers=headers, method="DELETE")
+    try:
+        with _urlreq.urlopen(req, timeout=20):
+            pass
+    except _urlerr.HTTPError as exc:
+        body = exc.read()[:200].decode(errors="replace")
+        return False, f"Delete failed (HTTP {exc.code}): {body}"
+    except (_urlerr.URLError, TimeoutError, OSError) as exc:
+        return False, f"Network problem: {exc}"
+    if image:
+        art_url = (SUPABASE_URL.rstrip("/")
+                   + f"/storage/v1/object/card-art/{image}")
+        req = _urlreq.Request(art_url, headers=headers, method="DELETE")
+        try:
+            with _urlreq.urlopen(req, timeout=20):
+                pass
+        except Exception:  # noqa: BLE001 — art cleanup is best-effort
+            return True, f"Deleted '{card_id}' (art object left behind)."
+    return True, f"Deleted '{card_id}' from the database."
+
+
 DRAFT_PATH_NAME = "draft.json"
 
 
@@ -452,6 +484,47 @@ def run() -> None:
     flavor_entry.grid(row=1, column=1, sticky="we", padx=(8, 0),
                       pady=(8, 0))
     txt.columnconfigure(1, weight=1)
+
+    # ---------------- Layout (text placement) ----------------
+    _sec, laysec = section("Layout  (text placement)")
+    tk.Label(laysec, text="Align", bg=NAVY, fg="#b9c0d4",
+             font=("Georgia", 9)).grid(row=0, column=0, sticky="w")
+    align_var = tk.StringVar(value="left")
+    ttk.Combobox(laysec, textvariable=align_var, state="readonly",
+                 values=["left", "center"], width=8).grid(
+        row=0, column=1, sticky="w", padx=(6, 14))
+    layout_entries = {}
+    for col, (key, label) in enumerate((("line_gap", "Line gap"),
+                                        ("rules_dy", "Rules Y"),
+                                        ("rules_dh", "Box height Δ"),
+                                        ("name_dy", "Name Y"),
+                                        ("flavor_dy", "Flavor Y"))):
+        cell = tk.Frame(laysec, bg=NAVY)
+        cell.grid(row=1, column=col, padx=(0, 12), pady=(8, 0), sticky="w")
+        tk.Label(cell, text=label, bg=NAVY, fg="#b9c0d4",
+                 font=("Georgia", 8)).pack()
+        e = styled_entry(cell, width=6, justify="center")
+        e.insert(0, "8" if key == "line_gap" else "0")
+        e.pack()
+        layout_entries[key] = e
+    tk.Label(laysec, text="Y offsets in pixels (±160); the rules box grows "
+                          "or shrinks by Δ and text re-wraps + auto-fits.",
+             bg=NAVY, fg="#5a648a", font=("Georgia", 8)).grid(
+        row=2, column=0, columnspan=6, sticky="w", pady=(6, 0))
+
+    def collect_layout() -> dict:
+        lay = {}
+        if align_var.get() != "left":
+            lay["align"] = align_var.get()
+        for key, widget in layout_entries.items():
+            try:
+                value = int(widget.get())
+            except ValueError:
+                continue
+            default = 8 if key == "line_gap" else 0
+            if value != default:
+                lay[key] = value
+        return lay
 
     def load_art(path: str):
         state["art_source"] = path
@@ -727,6 +800,7 @@ def run() -> None:
             keywords=list(chosen_keywords),
             rules_text=rules_box.get("1.0", "end").strip(),
             flavor=flavor_entry.get().strip(),
+            layout=collect_layout(),
             image=resolve_image_name(
                 id_entry.get().strip(),
                 editing["loaded_id"], editing["image"],
@@ -825,6 +899,9 @@ def run() -> None:
                    *stat_entries.values(), *font_entries.values()):
         widget.bind("<KeyRelease>", update_preview)
     rules_box.bind("<KeyRelease>", update_preview)
+    for widget in layout_entries.values():
+        widget.bind("<KeyRelease>", update_preview)
+    align_var.trace_add("write", lambda *a: update_preview())
     for var in ht_vars:
         var.trace_add("write", lambda *a: update_preview())
     rarity_var.trace_add("write", lambda *a: update_preview())
@@ -895,6 +972,12 @@ def run() -> None:
         set_entry.delete(0, "end")
         set_entry.insert(0, spec.set_code or "BASE")
         collectible_var.set(spec.collectible)
+        lay = dict(getattr(spec, "layout", {}) or {})
+        align_var.set(lay.get("align", "left"))
+        for key, widget in layout_entries.items():
+            widget.delete(0, "end")
+            widget.insert(0, str(lay.get(key,
+                                         8 if key == "line_gap" else 0)))
         editing["loaded_id"] = loaded_id
         editing["image"] = image_name
         refresh_kw_options()
@@ -908,6 +991,7 @@ def run() -> None:
             status.config(text=result, fg="#e58a8a")
             return
         rows = result
+        state["db_rows"] = list(rows)
         win = tk.Toplevel(root)
         win.title(f"Card Database — {len(rows)} cards")
         win.configure(bg=NAVY)
@@ -954,8 +1038,47 @@ def run() -> None:
                 fg="#e5c98a")
             win.destroy()
         listing.bind("<Double-Button-1>", load_selected)
-        tk.Button(win, text="Load selected", command=load_selected, bg=GOLD,
-                  relief="flat", padx=12, pady=4).pack(pady=(0, 10))
+
+        def delete_selected():
+            sel = listing.curselection()
+            if not sel:
+                return
+            row = shown_rows[sel[0]]
+            name = row.get("name", row.get("id"))
+            if not messagebox.askyesno(
+                    "Delete card",
+                    f"Permanently delete '{name}' from the database?\n"
+                    "Players lose access to it immediately."):
+                return
+            data = row.get("data") or {}
+            ok2, msg = delete_card(key, str(row.get("id", "")),
+                                   str(data.get("image", "") or ""))
+            status.config(text=msg, fg="#7dd487" if ok2 else "#e58a8a")
+            if ok2:
+                rows.remove(row)
+                state["db_rows"] = list(rows)
+                repopulate()
+
+        def refresh_rows():
+            ok2, result2 = fetch_cards(key)
+            if not ok2:
+                status.config(text=result2, fg="#e58a8a")
+                return
+            rows[:] = result2
+            state["db_rows"] = list(rows)
+            repopulate()
+            status.config(text=f"Refreshed — {len(rows)} cards.", fg=TEXT)
+
+        btns = tk.Frame(win, bg=NAVY)
+        btns.pack(pady=(0, 10))
+        tk.Button(btns, text="Load selected", command=load_selected, bg=GOLD,
+                  relief="flat", padx=12, pady=4).pack(side="left")
+        tk.Button(btns, text="Refresh", command=refresh_rows, bg=NAVY2,
+                  fg=TEXT, relief="flat", padx=12, pady=4).pack(
+            side="left", padx=8)
+        tk.Button(btns, text="Delete…", command=delete_selected,
+                  bg="#5a2430", fg="#f2d5d5", relief="flat", padx=12,
+                  pady=4).pack(side="left")
 
     def duplicate_card():
         base = name_entry.get().strip() or "card"
@@ -995,6 +1118,19 @@ def run() -> None:
         if spec is None:
             return
         key = key_entry.get().strip()
+        # smart guard: overwriting a card you did NOT load is usually a
+        # typo'd ID — confirm before clobbering
+        known = state.get("db_rows")
+        if known is None and key:
+            ok0, res0 = fetch_cards(key)
+            known = state["db_rows"] = res0 if ok0 else []
+        if known and spec.id != editing["loaded_id"]:
+            clash = next((r for r in known if r.get("id") == spec.id), None)
+            if clash is not None and not messagebox.askyesno(
+                    "Overwrite card",
+                    f"'{spec.id}' already exists in the database as "
+                    f"'{clash.get('name')}'.\nOverwrite it?"):
+                return
         ok, message = publish(spec, rendered_card(spec), key)
         status.config(text=message, fg="#7dd487" if ok else "#e58a8a")
         if ok:
@@ -1063,6 +1199,8 @@ def run() -> None:
     else:
         status.config(text="Tip: pip install tkinterdnd2 to enable "
                            "drag-and-drop art.", fg=TEXT)
+    root.bind("<Control-s>", lambda _e: do_publish())
+    root.bind("<Control-d>", lambda _e: duplicate_card())
     apply_type_gating()
     restore_draft_if_any()
     update_preview()

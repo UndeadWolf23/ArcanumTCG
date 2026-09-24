@@ -81,6 +81,7 @@ def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:
         data: dict[str, Any] = {
             "name": player.name,
             "mana": player.mana, "max_mana": player.max_mana,
+            "energy_next_turn": player.energy_next_turn,
             "champion": card_to_dict(player.champion) if player.champion else None,
             "board": [card_to_dict(c) for c in player.board],
             "relics": [card_to_dict(c) for c in player.relics],
@@ -101,6 +102,9 @@ def snapshot_for(match: MatchState, viewer: int) -> dict[str, Any]:
         "opp": side(them, full_hand=False),
         "your_turn": match.active == viewer,
         "phase": match.phase.value,
+        "priority": (None if match.priority is None
+                     else (0 if match.priority == viewer else 1)),
+        "priority_reason": match.priority_reason,
         "turn": match.turn_number,
         "winner": winner_rel,
         "started": match.started,
@@ -126,6 +130,9 @@ def _sync_list(existing: list[CardInstance], incoming: list[dict],
 
 def apply_snapshot(mirror: MatchState, snap: dict[str, Any]) -> None:
     """Apply a redacted snapshot to the client mirror. Viewer is seat 0."""
+    raw = snap.get("priority")
+    mirror.priority = None if raw is None else int(raw)
+    mirror.priority_reason = str(snap.get("priority_reason", ""))
     you, opp = mirror.player(0), mirror.player(1)
     you_data, opp_data = snap["you"], snap["opp"]
 
@@ -133,6 +140,7 @@ def apply_snapshot(mirror: MatchState, snap: dict[str, Any]) -> None:
         player.name = data.get("name", player.name)
         player.mana = int(data["mana"])
         player.max_mana = int(data["max_mana"])
+        player.energy_next_turn = int(data.get("energy_next_turn", 0))
         pool: dict[int, CardInstance] = {
             c.uid: c for c in (*player.hand, *player.board, *player.relics)}
         if player.champion is not None:

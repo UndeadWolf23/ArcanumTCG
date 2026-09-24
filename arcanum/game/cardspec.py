@@ -43,6 +43,7 @@ class CardSpec:
     rules_text: str = ""            # custom ability text (beyond keywords)
     flavor: str = ""
     image: str = ""                 # storage object name, e.g. "h_batman.png"
+    layout: dict = field(default_factory=dict)  # text placement overrides
     set_code: str = "BASE"
     collectible: bool = True
 
@@ -73,7 +74,8 @@ class CardSpec:
             "durability": self.durability, "hero_types": list(self.hero_types),
             "keywords": [{"id": r.id, "value": r.value} for r in self.keywords],
             "rules_text": self.rules_text, "flavor": self.flavor,
-            "image": self.image, "set_code": self.set_code,
+            "image": self.image,
+            "layout": dict(self.layout), "set_code": self.set_code,
             "collectible": self.collectible,
         }
 
@@ -94,6 +96,7 @@ class CardSpec:
             rules_text=str(data.get("rules_text", "")),
             flavor=str(data.get("flavor", "")),
             image=str(data.get("image", "")),
+            layout={k: v for k, v in dict(data.get("layout") or {}).items()},
             set_code=str(data.get("set_code", "BASE")),
             collectible=bool(data.get("collectible", True)),
         )

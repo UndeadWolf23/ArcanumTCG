@@ -259,6 +259,25 @@ class MatchSession:
             await asyncio.sleep(END_DELAY)
             await self._advance()
 
+    async def _wait_response_window(self, reason: str,
+                                    seat: int = 0) -> None:
+        """MTG-Arena pacing: if a responder may act (Blink/Flash/Bluff),
+        open the window, tell them, and hold the game until they act."""
+        if self.ai is not None and seat == 1:
+            return                        # the bot never bluffs
+        if not self.match.open_priority(seat, reason):
+            return
+        await self.broadcast_delta([{"type": "priority", "player": 0,
+                                     "reason": reason}])
+        self._priority_event = asyncio.Event()
+        try:
+            await asyncio.wait_for(self._priority_event.wait(), timeout=45)
+        except asyncio.TimeoutError:
+            self.match.pass_priority(0)     # nobody responds forever
+            await self.broadcast_delta([{"type": "priority_passed",
+                                         "player": 0, "timeout": True}])
+        self._priority_event = None
+
     async def _ai_phase(self, phase: Phase) -> None:
         assert self.ai is not None
         while not self.closed and self.match.winner is None:
@@ -290,7 +309,11 @@ class MatchSession:
                 log.warning("Server AI intent rejected: %s", reason)
                 break
             await self.broadcast_delta(events)
+            what = card.name if phase is Phase.MAIN else attacker.name
+            await self._wait_response_window(f"{what} — you may respond")
         if not self.closed and self.match.winner is None:
+            await self._wait_response_window(
+                f"end of their {phase.value} — you may respond")
             await self._advance()
 
     # ------------------------------------------------------------ intents
@@ -299,11 +322,32 @@ class MatchSession:
             return
         mtype = env.type
         if mtype == MsgType.INTENT_PASS_PRIORITY.value:
-            if (self.match.active == seat_index
+            if self.match.priority == seat_index:
+                # responder waives the Blink/Flash window
+                self.match.pass_priority(seat_index)
+                await self.broadcast_delta([{"type": "priority_passed",
+                                             "player": seat_index}])
+                if getattr(self, "_priority_event", None) is not None:
+                    self._priority_event.set()
+            elif (self.match.active == seat_index
                     and self.match.phase in (Phase.MAIN, Phase.COMBAT)
                     and self.match.winner is None):
                 await self._advance()
                 self._pass_event.set()
+            return
+        if mtype == MsgType.INTENT_PRIORITY_PREFS.value:
+            player = self.match.players[seat_index]
+            if "bluff" in env.payload:
+                player.bluff = bool(env.payload["bluff"])
+            if "auto_pass" in env.payload:
+                player.auto_pass = bool(env.payload["auto_pass"])
+            # enabling auto-pass releases a window you were holding
+            if player.auto_pass and self.match.priority == seat_index:
+                self.match.pass_priority(seat_index)
+                await self.broadcast_delta([{"type": "priority_passed",
+                                             "player": seat_index}])
+                if getattr(self, "_priority_event", None) is not None:
+                    self._priority_event.set()
             return
         if mtype == MsgType.INTENT_CONCEDE.value:
             await self._end_by_forfeit(loser=seat_index)
@@ -338,6 +382,15 @@ class MatchSession:
                 payload={"code": "rejected", "message": reason},
                 match_id=self.match_id))
             return
+        if self.match.priority is None and \
+                getattr(self, "_priority_event", None) is not None:
+            self._priority_event.set()
+        if mtype in (MsgType.INTENT_PLAY_CARD.value,
+                     MsgType.INTENT_ATTACK.value,
+                     MsgType.INTENT_ACTIVATE.value) \
+                and self.match.winner is None:
+            await self._wait_response_window("you may respond",
+                                             seat=1 - seat_index)
         await self.broadcast_delta(events)
         if self.match.winner is not None:
             self._pass_event.set()

@@ -56,6 +56,9 @@ def body_font(size: int, bold: bool = False) -> pygame.font.Font:
 # Draw helpers
 # ---------------------------------------------------------------------------
 
+_TEXT_CACHE: dict = {}
+
+
 def draw_text(
     surface: pygame.Surface,
     text: str,
@@ -65,8 +68,15 @@ def draw_text(
     anchor: str = "topleft",
     alpha: int = 255,
 ) -> pygame.Rect:
-    img = font.render(text, True, color)
+    key = (id(font), text, color)
+    img = _TEXT_CACHE.get(key)
+    if img is None:
+        img = font.render(text, True, color)
+        if len(_TEXT_CACHE) > 700:      # HUD strings churn slowly; cap it
+            _TEXT_CACHE.clear()
+        _TEXT_CACHE[key] = img
     if alpha < 255:
+        img = img.copy()
         img.set_alpha(alpha)
     rect = img.get_rect(**{anchor: pos})
     surface.blit(img, rect)

@@ -43,6 +43,7 @@ class MsgType(str, Enum):
     INTENT_ATTACK = "intent.attack"
     INTENT_BLOCK = "intent.block"
     INTENT_ACTIVATE = "intent.activate"
+    INTENT_PRIORITY_PREFS = "intent.priority_prefs"
     INTENT_PASS_PRIORITY = "intent.pass_priority"
     INTENT_MULLIGAN = "intent.mulligan"
     INTENT_CONCEDE = "intent.concede"

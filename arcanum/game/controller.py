@@ -48,6 +48,9 @@ class MatchController:
     def start(self) -> None: ...
     def play_card(self, uid: int, target_uid: int | None = None,
                   as_guard: bool | None = None) -> None: ...
+    def pass_priority(self) -> None: ...
+    def set_priority_prefs(self, bluff: bool | None = None,
+                           auto_pass: bool | None = None) -> None: ...
     def attack(self, attacker_uid: int, target_uid: int) -> None: ...
     def pass_phase(self) -> None: ...
     def concede(self) -> None: ...
@@ -68,13 +71,21 @@ class MatchController:
 # Local (offline practice)
 # ---------------------------------------------------------------------------
 class LocalController(MatchController):
+    _resume_after_priority = None
+
     def activate(self, uid: int, ability: str, target_uid: int = 0,
                  amount: int | None = None) -> None:
+        was_priority = self.state.priority == 0
         ok, why, events = self.state.activate(0, uid, ability, target_uid,
                                               amount)
         if not ok:
             self._emit({"type": "rejected", "reason": why})
             return
+        if was_priority and self.state.priority is None:
+            resume = self._resume_after_priority
+            self._resume_after_priority = None
+            if resume is not None:
+                self._schedule(0.6, resume)
         for event in self._normalize(events):
             self._emit(event)
 
@@ -191,13 +202,43 @@ class LocalController(MatchController):
     def _advance(self) -> None:
         if self._closed or self.state.winner is not None:
             return
+        if self.state.priority is not None:
+            return                      # the window holds the game
+        if self.state.active == 1 and self._hold_for_response(
+                self._advance, f"end of their {self.state.phase.value}"):
+            return
         self.state.advance_phase()
         for _ev in self._normalize(self._flush_turn_events()):
             self._emit(_ev)
         self._emit(self._phase_event())
         self._enter_phase()
 
+    def _hold_for_response(self, resume, reason: str) -> bool:
+        """MTG-Arena moment: pause the AI's flow if the human may respond.
+        The window resumes `resume` once passed (or a blink resolves)."""
+        if self.state.open_priority(0, reason):
+            self._emit({"type": "priority", "player": 0, "reason": reason})
+            self._resume_after_priority = resume
+            token = object()
+            self._priority_token = token
+
+            def _timeout():
+                if self.state.priority == 0 \
+                        and getattr(self, "_priority_token", None) is token:
+                    self.state.pass_priority(0)
+                    self._emit({"type": "priority_passed", "player": 0,
+                                "timeout": True})
+                    held = self._resume_after_priority
+                    self._resume_after_priority = None
+                    if held is not None:
+                        held()
+            self._schedule(45.0, _timeout)
+            return True
+        return False
+
     def _ai_play_step(self) -> None:
+        if self.state.priority is not None:
+            return                        # window open: the human has time
         choice = self.ai.choose_play(self.state)
         if choice is None:
             self._advance()
@@ -219,9 +260,15 @@ class LocalController(MatchController):
         self.opp_hand_count = max(0, self.opp_hand_count - 1)
         for event in self._normalize(events):
             self._emit(event)
+        if self._hold_for_response(
+                lambda: self._schedule(0.5, self._ai_play_step),
+                f"{card.name} was played"):
+            return
         self._schedule(0.85, self._ai_play_step)
 
     def _ai_attack_step(self) -> None:
+        if self.state.priority is not None:
+            return
         choice = self.ai.choose_attack(self.state)
         if choice is None:
             self._advance()
@@ -240,9 +287,32 @@ class LocalController(MatchController):
             return
         for event in self._normalize(events):
             self._emit(event)
+        if self._hold_for_response(
+                lambda: self._schedule(0.6, self._ai_attack_step),
+                f"{attacker.name} attacked"):
+            return
         self._schedule(1.05, self._ai_attack_step)
 
     # -- intents -------------------------------------------------------------
+    def pass_priority(self) -> None:
+        if self.state.pass_priority(0):
+            self._emit({"type": "priority_passed", "player": 0})
+            resume = getattr(self, "_resume_after_priority", None)
+            self._resume_after_priority = None
+            if resume is not None:
+                resume()
+
+    def set_priority_prefs(self, bluff: bool | None = None,
+                           auto_pass: bool | None = None) -> None:
+        player = self.state.player(0)
+        if bluff is not None:
+            player.bluff = bool(bluff)
+        if auto_pass is not None:
+            player.auto_pass = bool(auto_pass)
+        # flipping auto-pass ON releases a window you were holding
+        if player.auto_pass and self.state.priority == 0:
+            self.pass_priority()
+
     def play_card(self, uid: int, target_uid: int | None = None,
                   as_guard: bool | None = None) -> None:
         ok, reason, events = self.state.play_card(0, uid, target_uid,
@@ -252,6 +322,11 @@ class LocalController(MatchController):
             return
         for event in self._normalize(events):
             self._emit(event)
+        if self.state.priority is None:
+            resume = getattr(self, "_resume_after_priority", None)
+            self._resume_after_priority = None
+            if resume is not None:
+                self._schedule(0.6, resume)
 
     def attack(self, attacker_uid: int, target_uid: int) -> None:
         ok, reason, events = self.state.attack(0, attacker_uid, target_uid)

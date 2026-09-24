@@ -96,6 +96,35 @@ def _wrap(draw, text: str, font, max_width: int) -> list[str]:
     return lines
 
 
+LAYOUT_KEYS = ("name_dy", "type_dy", "rules_dy", "rules_dh",
+               "flavor_dy", "line_gap", "align")
+
+
+def resolve_layout(layout: dict | None) -> dict:
+    """Effective text-layout parameters: designer overrides on top of the
+    template defaults. Pure math — unit-testable without PIL."""
+    lay = dict(layout or {})
+    def num(key, default=0, lo=-160, hi=160):
+        try:
+            return max(lo, min(hi, int(lay.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+    align = str(lay.get("align", "left")).lower()
+    if align not in ("left", "center"):
+        align = "left"
+    left, top, right, bottom = RULES_BOX
+    dy, dh = num("rules_dy"), num("rules_dh")
+    return {
+        "name_dy": num("name_dy"),
+        "type_dy": num("type_dy"),
+        "flavor_dy": num("flavor_dy"),
+        "line_gap": num("line_gap", 8, 0, 40),
+        "align": align,
+        "rules_box": (left, max(0, top + dy), right,
+                      min(TEMPLATE_SIZE[1], bottom + dy + dh)),
+    }
+
+
 class CardRenderer:
     """One renderer per rarity frame; caches template + masks."""
 
@@ -199,14 +228,18 @@ class CardRenderer:
         # 4) text
         draw = ImageDraw.Draw(card)
 
+        lay = resolve_layout(getattr(spec, "layout", None))
+        name_pos = (NAME_CENTER[0], NAME_CENTER[1] + lay["name_dy"])
         font = _fit_text(draw, spec.name, sizes["name"], NAME_MAX_W, bold=True)
-        self._shadow_text(card, NAME_CENTER, spec.name, font)
+        self._shadow_text(card, name_pos, spec.name, font)
 
         type_line = spec.card_type.value.title()
         if spec.hero_types:
             type_line += "   —   " + " / ".join(spec.hero_types)
         font = _fit_text(draw, type_line, sizes["type"], TYPE_MAX_W)
-        self._shadow_text(card, TYPE_CENTER, type_line, font)
+        self._shadow_text(card, (TYPE_CENTER[0],
+                                 TYPE_CENTER[1] + lay["type_dy"]),
+                          type_line, font)
 
         gem = (self.metrics["gem"][0] + COST_NUDGE[0],
                self.metrics["gem"][1] + COST_NUDGE[1])
@@ -215,26 +248,35 @@ class CardRenderer:
 
         # rules text (auto-shrinks below the chosen size if it overflows)
         draw = ImageDraw.Draw(card)
-        left, top, right, bottom = RULES_BOX
+        left, top, right, bottom = lay["rules_box"]
         box_w = right - left
         font_size = sizes["rules"]
-        while font_size >= 16:
+        gap = lay["line_gap"]
+        while font_size >= 14:
             font = _load_font(font_size)
             lines = _wrap(draw, spec.composed_text(), font, box_w)
-            line_h = font_size + 8
+            line_h = font_size + gap
             if len(lines) * line_h <= (bottom - top):
                 break
             font_size -= 2
         y = top
+        centered = lay["align"] == "center"
+        cx = (left + right) // 2
         for line in lines:
-            self._shadow_text(card, (left, y), line, font, anchor="la",
-                              trace=2)
+            if centered:
+                self._shadow_text(card, (cx, y), line, font, anchor="ma",
+                                  trace=2)
+            else:
+                self._shadow_text(card, (left, y), line, font, anchor="la",
+                                  trace=2)
             y += line_h
 
         if spec.flavor:
             font = _fit_text(draw, f"“{spec.flavor}”", sizes["flavor"],
                              FLAVOR_MAX_W)
-            self._shadow_text(card, FLAVOR_CENTER, f"“{spec.flavor}”", font,
+            self._shadow_text(card, (FLAVOR_CENTER[0],
+                                     FLAVOR_CENTER[1] + lay["flavor_dy"]),
+                              f"“{spec.flavor}”", font,
                               fill=(230, 232, 240), trace=2)
 
         stats = self._stats_text(spec)

@@ -144,6 +144,9 @@ class PlayerState:
     minions_this_turn: int = 0       # Rally counts token spawns
     spells_this_turn: int = 0        # Ritual's default condition
     legacy: list = field(default_factory=list)   # (relic, expires_turn)
+    energy_next_turn: int = 0        # deferred gains; CAN exceed the cap
+    bluff: bool = False              # open response windows even w/o blinks
+    auto_pass: bool = False          # never hold response windows
     barriers: list[CardInstance] = field(default_factory=list)
     void: list[CardInstance] = field(default_factory=list)
     shielded_until_turn: int = 0     # Last Wall: champion damage immunity
@@ -167,6 +170,8 @@ class MatchState:
         self.active = 0
         self.phase: Phase = Phase.DRAW
         self.turn_number = 0
+        self.priority: int | None = None      # who may respond right now
+        self.priority_reason: str = ""
         self.started = False
         self.winner: Optional[int] = None
         self.stack: list[StackItem] = []
@@ -330,7 +335,8 @@ class MatchState:
         self.turn_number += 1
         player = self.players[index]
         player.max_mana = min(MAX_MANA, player.max_mana + 1)
-        player.mana = player.max_mana
+        player.mana = player.max_mana + player.energy_next_turn
+        player.energy_next_turn = 0          # banked energy breaks the cap
         for side in self.players:            # "until end of turn" expires
             side.minions_this_turn = 0
             side.spells_this_turn = 0
@@ -364,6 +370,8 @@ class MatchState:
 
     # ------------------------------------------------------------ phases
     def advance_phase(self) -> Phase:
+        if self.priority is not None:
+            return self.phase            # a response window holds the game
         if not self.started:
             raise RuntimeError("Match has not started.")
         order = list(PHASE_ORDER)
@@ -422,11 +430,17 @@ class MatchState:
             return False, "The match hasn't started."
         if self.winner is not None:
             return False, "The match is over."
-        if index != self.active:
-            return False, "It isn't your turn."
-        if self.phase is not Phase.MAIN:
-            return False, "Cards can only be played in your main phase."
         card, from_void = self._find_playable(index, uid)
+        is_blink = (card is not None and card.kind is Kind.SPELL
+                    and card.has_kw("blink"))
+        if index != self.active:
+            if not is_blink:
+                return False, "It isn't your turn."
+            if self.priority != index:
+                return False, ("Blink spells wait for a response window — "
+                               "one opens after each of their actions.")
+        elif self.phase is not Phase.MAIN and not is_blink:
+            return False, "Cards can only be played in your main phase."
         if card is None:
             return False, "That card isn't in your hand."
         player = self.players[index]
@@ -542,6 +556,9 @@ class MatchState:
                  player.name, card.name, card.cost, player.mana)
         if card.kind is Kind.SPELL:
             player.spells_this_turn += 1
+            if self.priority == index:
+                self.priority = None
+                self.priority_reason = ""
             self.on_spell_cast(index, events)
         return True, "", events
 
@@ -652,6 +669,66 @@ class MatchState:
         if guard:
             return guard                 # champion's own barrier last
         return [enemy.champion] if enemy.champion else []
+    # ------------------------------------------------ priority (Blink/Flash)
+    def instant_actions(self, index: int) -> list[dict]:
+        """Everything this player could legally do AT INSTANT SPEED right
+        now: castable Blink spells and available Flash relic abilities."""
+        out: list[dict] = []
+        if not self.started or self.winner is not None:
+            return out
+        player = self.players[index]
+        for card in player.hand:
+            if card.kind is Kind.SPELL and card.has_kw("blink") \
+                    and player.mana >= card.cost:
+                if not card.needs_target or self.valid_targets(index, card):
+                    out.append({"kind": "blink", "uid": card.uid})
+        prior = self.priority
+        try:
+            self.priority = index          # probe as if the window were open
+            for relic in player.relics:
+                if not relic.has_kw("flash"):
+                    continue
+                for ability in self.available_abilities(index, relic.uid):
+                    out.append({"kind": "flash", "uid": relic.uid,
+                                "ability": ability})
+        finally:
+            self.priority = prior
+        return out
+
+    def wants_priority(self, index: int) -> bool:
+        """Would a response window pause the game for this player?
+        Auto-pass waives everything; Bluff holds windows even empty."""
+        player = self.players[index]
+        if player.auto_pass:
+            return False
+        return player.bluff or bool(self.instant_actions(index))
+
+    def open_priority(self, index: int, reason: str = "") -> bool:
+        """Offer the response window; True when the game must PAUSE."""
+        if self.winner is not None or self.priority is not None:
+            return self.priority is not None
+        if not self.wants_priority(index):
+            return False
+        self.priority = index
+        self.priority_reason = reason
+        return True
+
+    def pass_priority(self, index: int) -> bool:
+        if self.priority != index:
+            return False
+        self.priority = None
+        self.priority_reason = ""
+        return True
+
+    def _gain_energy_next_turn(self, index: int, amount: int,
+                               events: list) -> None:
+        """Banked energy arrives with your next refill and may exceed the
+        {MAX_MANA} cap — the reward for patience."""
+        self.players[index].energy_next_turn += amount
+        events.append({"type": "energy_next_turn", "player": index,
+                       "amount": amount,
+                       "total": self.players[index].energy_next_turn})
+
     def _gain_energy(self, index: int, amount: int, events: list,
                      extra: bool = True) -> None:
         """All energy gains flow through here. `extra` energy (Channel,
@@ -1324,7 +1401,11 @@ class MatchState:
         owner, card, zone = self._find_card(uid)
         if owner != index or card is None:
             return []
-        if self.active != index or self.phase is not Phase.MAIN:
+        flash_relic = card.kind is Kind.RELIC and card.has_kw("flash")
+        if self.active != index:
+            if not (flash_relic and self.priority == index):
+                return []
+        elif self.phase is not Phase.MAIN and not flash_relic:
             return []
         out = []
         if card.has_kw("channel") and not card.exhausted and not card.sick:
@@ -1353,12 +1434,16 @@ class MatchState:
         if ability not in self.available_abilities(index, uid):
             return False, "That ability can't be used right now.", events
         owner, card, zone = self._find_card(uid)
+        if self.priority == index and card is not None \
+                and card.kind is Kind.RELIC and card.has_kw("flash"):
+            self.priority = None
+            self.priority_reason = ""
         player = self.players[index]
         if ability == "channel":
             card.exhausted = True
             events.append({"type": "keyword", "keyword": "channel",
                            "player": index, "uid": uid})
-            self._gain_energy(index, 1, events)
+            self._gain_energy_next_turn(index, 1, events)
         elif ability == "discharge":
             t_owner, target, t_zone = self._find_card(target_uid)
             legal = self.valid_ability_targets(index, uid, "discharge")
@@ -1418,7 +1503,7 @@ class MatchState:
             self._on_sacrifice(index, events)
             events.append({"type": "keyword", "keyword": "sacrifice",
                            "player": index, "uid": uid})
-            # payoff: the champion feeds — 2 life and 1 energy
+            # payoff: the champion feeds — 2 life, 1 energy next turn
             heal = min(2, card.max_health - card.health)
             if heal > 0:
                 card.health += heal
@@ -1426,7 +1511,7 @@ class MatchState:
                                "uid": card.uid, "amount": heal,
                                "health": card.health})
                 self.on_champion_life_gain(index, events)
-            self._gain_energy(index, 1, events)
+            self._gain_energy_next_turn(index, 1, events)
         elif ability == "tribute":
             self._destroy_relic(index, card, events, sacrifice=True)
             events.append({"type": "keyword", "keyword": "tribute",
@@ -1678,7 +1763,7 @@ class MatchState:
                 killer_owner = owner_of(killer)
                 events.append({"type": "keyword", "keyword": "feast",
                                "player": killer_owner, "uid": killer.uid})
-                self._gain_energy(killer_owner, 1, events)
+                self._gain_energy_next_turn(killer_owner, 1, events)
 
         if target.kind is Kind.CREATURE:
             resolve_death(target)
